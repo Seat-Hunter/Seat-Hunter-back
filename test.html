@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>Backend Test</title>
+  <style>
+    body { font-family: monospace; padding: 20px; background: #1e1e1e; color: #d4d4d4; }
+    button { margin: 5px; padding: 8px 16px; background: #0e639c; color: white; border: none; cursor: pointer; border-radius: 4px; }
+    button:hover { background: #1177bb; }
+    pre { background: #252526; padding: 12px; border-radius: 4px; white-space: pre-wrap; word-break: break-all; }
+    input { background: #3c3c3c; color: white; border: 1px solid #555; padding: 6px; border-radius: 4px; width: 300px; }
+    .section { margin: 20px 0; border: 1px solid #444; padding: 16px; border-radius: 6px; }
+    h3 { color: #4ec9b0; margin-top: 0; }
+    .log { max-height: 200px; overflow-y: auto; }
+  </style>
+</head>
+<body>
+  <h2>🧪 Speech Backend Test</h2>
+
+  <div class="section">
+    <h3>1. Health Check</h3>
+    <button onclick="healthCheck()">GET /health</button>
+    <pre id="health-result">-</pre>
+  </div>
+
+  <div class="section">
+    <h3>2. 세션 생성</h3>
+    <button onclick="createSession()">POST /sessions</button>
+    <pre id="session-result">-</pre>
+  </div>
+
+  <div class="section">
+    <h3>3. 세션 시작 / 종료</h3>
+    <input id="session-id-input" placeholder="session_id 붙여넣기" />
+    <br><br>
+    <button onclick="startSession()">POST /start</button>
+    <button onclick="endSession()">POST /end</button>
+    <pre id="state-result">-</pre>
+  </div>
+
+  <div class="section">
+    <h3>4. WebSocket 연결</h3>
+    <input id="ws-session-id" placeholder="session_id 붙여넣기" />
+    <br><br>
+    <button onclick="connectWS()">연결</button>
+    <button onclick="sendVadTrue()">vad_state (speaking)</button>
+    <button onclick="sendVadFalse()">vad_state (silent)</button>
+    <button onclick="disconnectWS()">연결 끊기</button>
+    <div class="log"><pre id="ws-log">-</pre></div>
+  </div>
+
+  <script>
+    const BASE = "http://localhost:8000";
+    let ws = null;
+
+    async function healthCheck() {
+      const res = await fetch(`${BASE}/health`);
+      const data = await res.json();
+      document.getElementById("health-result").textContent = JSON.stringify(data, null, 2);
+    }
+
+    async function createSession() {
+      const res = await fetch(`${BASE}/api/v1/sessions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          user_id: 1,
+          presentation_type: "job_interview",
+          audience_type: "interviewer",
+          pressure_level: "medium",
+          duration_seconds: 300,
+          interrupt_enabled: true
+        })
+      });
+      const data = await res.json();
+      document.getElementById("session-result").textContent = JSON.stringify(data, null, 2);
+      document.getElementById("session-id-input").value = data.session_id ?? "";
+      document.getElementById("ws-session-id").value = data.session_id ?? "";
+    }
+
+    async function startSession() {
+      const id = document.getElementById("session-id-input").value;
+      const res = await fetch(`${BASE}/api/v1/sessions/${id}/start`, { method: "POST" });
+      const data = await res.json();
+      document.getElementById("state-result").textContent = JSON.stringify(data, null, 2);
+    }
+
+    async function endSession() {
+      const id = document.getElementById("session-id-input").value;
+      const res = await fetch(`${BASE}/api/v1/sessions/${id}/end`, { method: "POST" });
+      const data = await res.json();
+      document.getElementById("state-result").textContent = JSON.stringify(data, null, 2);
+    }
+
+    function connectWS() {
+      const id = document.getElementById("ws-session-id").value;
+      ws = new WebSocket(`ws://localhost:8000/ws/sessions/${id}`);
+      ws.onopen = () => log("✅ WebSocket 연결됨");
+      ws.onmessage = (e) => log("📨 수신: " + e.data);
+      ws.onclose = () => log("❌ 연결 종료");
+      ws.onerror = (e) => log("⚠️ 에러: " + e);
+    }
+
+    function sendVadTrue() {
+      send({ type: "vad_state", timestamp_ms: Date.now(), is_speaking: true });
+    }
+
+    function sendVadFalse() {
+      send({ type: "vad_state", timestamp_ms: Date.now(), is_speaking: false });
+    }
+
+    function send(payload) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        log("⚠️ WebSocket 연결 안 됨");
+        return;
+      }
+      ws.send(JSON.stringify(payload));
+      log("📤 송신: " + JSON.stringify(payload));
+    }
+
+    function disconnectWS() {
+      if (ws) ws.close();
+    }
+
+    function log(msg) {
+      const el = document.getElementById("ws-log");
+      el.textContent += "\n" + msg;
+      el.scrollTop = el.scrollHeight;
+    }
+  </script>
+</body>
+</html>
