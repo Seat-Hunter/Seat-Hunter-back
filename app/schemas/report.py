@@ -1,7 +1,3 @@
-# 세션 종료 후 종합 리포트를 생성할 때 사용하는 입력 및 출력 데이터 구조를 정의하는 스키마 파일
-# 이 파일은 transcript, interrupt log, answer evaluation log, speech metrics, recovery metrics를 받아
-# 최종 요약 통계, 점수, 개선 포인트, 누적 패턴, 커리큘럼 추천을 반환하기 위한 형식을 정의한다.
-
 from typing import List, Optional
 from pydantic import BaseModel, Field
 
@@ -53,10 +49,6 @@ class SpeechMetricsSnapshot(BaseModel):
 class RecoveryMetricsInput(BaseModel):
     """
     인터럽트 후 회복 지표 입력
-
-    - wpm_recovery_speed_score: 정상 말속도로 회복하는 속도 (0~100)
-    - filler_reduction_score: 필러 감소율 점수 (0~100)
-    - silence_reduction_score: 침묵 감소 점수 (0~100)
     """
     wpm_recovery_speed_score: float
     filler_reduction_score: float
@@ -66,7 +58,6 @@ class RecoveryMetricsInput(BaseModel):
 class UserPatternInput(BaseModel):
     """
     사용자 누적 패턴 입력
-    기존 저장값이 있다면 이 구조로 넘겨받아 갱신할 수 있다.
     """
     session_count: int = 0
     repeated_weaknesses: List[str] = Field(default_factory=list)
@@ -117,3 +108,16 @@ class ReportGenerationResult(BaseModel):
     recovery_score: float
     curriculum_next: str
     updated_pattern: UserPatternOutput
+
+
+class ReportFeedback(BaseModel):
+    strengths: List[str]
+    weaknesses: List[str]
+    improvements: List[str]
+
+
+class ReportResponse(BaseModel):
+    session_id: str
+    summary: ReportSummary
+    feedback: ReportFeedback
+    curriculum_next: Optional[str] = None
