@@ -1,7 +1,13 @@
 import uuid
 from app.core.redis_client import SessionRedis
 from app.schemas.session import SessionState
-from app.repositories import session_repository
+from app.repositories import session_repository, report_repository
+from app.services.report_service import ReportService
+from app.schemas.report import (
+    ReportGenerationInput,
+    RecoveryMetricsInput,
+    UserPatternInput,
+)
 
 
 class SessionService:
@@ -21,7 +27,49 @@ class SessionService:
         sr = SessionRedis(session_id)
         await sr.set_state(SessionState.FINISHED)
         await session_repository.update_session_ended(session_id)
-        await sr.delete_all()  # Redis 정리
+
+        # 리포트 자동 생성
+        try:
+            metrics = await sr.get_metrics()
+            report_service = ReportService()
+
+            from app.schemas.report import SpeechMetricsSnapshot
+            snapshot = SpeechMetricsSnapshot(
+                recent_wpm=metrics.get("current_wpm", 0),
+                average_wpm=metrics.get("current_wpm", 0),
+                filler_count=metrics.get("filler_count_recent", 0),
+                silence_duration=metrics.get("silence_ms", 0),
+                hesitation_score=0.0,
+                stress_score=metrics.get("stress_score", 0),
+            )
+
+            report_input = ReportGenerationInput(
+                speech_metrics=[snapshot],
+                recovery_metrics=RecoveryMetricsInput(
+                    wpm_recovery_speed_score=50.0,
+                    filler_reduction_score=50.0,
+                    silence_reduction_score=50.0,
+                ),
+                user_pattern=UserPatternInput(),
+            )
+
+            result = report_service.generate_report(report_input)
+
+            await report_repository.insert_report(session_id, {
+                "avg_wpm": result.summary.avg_wpm,
+                "filler_count": result.summary.filler_count,
+                "interrupt_count": result.summary.interrupt_count,
+                "recovery_score": result.recovery_score,
+                "overall_score": result.overall_score,
+                "strengths_json": result.strengths,
+                "weaknesses_json": result.weaknesses,
+                "improvements_json": result.improvements,
+                "curriculum_next": result.curriculum_next,
+            })
+        except Exception as e:
+            print(f"[리포트 생성 에러] {e}")
+
+        await sr.delete_all()
 
     async def transition_state(self, session_id: str, new_state: SessionState):
         await SessionRedis(session_id).set_state(new_state)
