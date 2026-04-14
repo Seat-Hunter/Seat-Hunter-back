@@ -16,6 +16,7 @@ class STTAggregator:
         self._dg_connection = None
         self._segment_index = 0
         self._closed = False
+        self._on_final_callback = None
 
     async def start_deepgram(self):
         try:
@@ -78,6 +79,13 @@ class STTAggregator:
             make_final_transcript(segment_id, text, start_ms, end_ms)
         )
 
+        # 콜백 호출
+        if self._on_final_callback:
+            try:
+                await self._on_final_callback(text, start_ms, end_ms)
+            except Exception as e:
+                print(f"[STT 콜백 에러] {e}")
+
     async def send_audio(self, audio_base64: str):
         if self._dg_connection and not self._closed:
             try:
@@ -95,3 +103,6 @@ class STTAggregator:
                 await self._dg_connection.finish()
             except Exception:
                 pass
+
+    def set_on_final_transcript(self, callback):
+        self._on_final_callback = callback
