@@ -16,8 +16,10 @@ class SpeechAnalysisResult(BaseModel):
     """Speech Analyzer 출력 데이터"""
     recent_wpm: float
     average_wpm: float
-    filler_count: int
-    silence_duration: int
+    filler_count: int           # 세션 전체 누적 필러 수
+    filler_count_segment: int   # 이번 세그먼트 필러 수 (피드백 판단용)
+    silence_duration: int       # 세션 전체 누적 침묵 ms
+    current_silence_ms: int     # 직전 세그먼트 이후 침묵 ms (피드백 판단용)
     silence_count: int
     response_latency: int
     hesitation_score: float

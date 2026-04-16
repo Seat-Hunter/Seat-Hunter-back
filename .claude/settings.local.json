@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/채령/AppData/Local/Programs/Python/Python311//**)",
+      "Read(//c//**)",
+      "Bash(find /c -name \"python.exe\" -maxdepth 6)",
+      "Bash(where redis-server *)",
+      "Read(//c/Program Files/Redis//**)",
+      "Read(//c/Users/채령/scoop/apps/**)"
+    ]
+  }
+}

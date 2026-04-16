@@ -28,9 +28,9 @@ class AudienceService:
         분석 결과를 바탕으로 청중 반응 결정
         """
         wpm = analysis.recent_wpm
-        filler = analysis.filler_count
+        filler = analysis.filler_count_segment   # 이번 세그먼트 필러만 사용
         stress = analysis.stress_score
-        silence = analysis.silence_duration
+        silence = analysis.current_silence_ms    # 직전 침묵 간격만 사용
 
         reaction, intensity, reason = self._decide_reaction(wpm, filler, stress, silence)
 
@@ -97,8 +97,8 @@ class AudienceService:
             self.consecutive_good = 0
             return "cold", 0.6, "말속도 너무 느림"
 
-        # 필러 많음
-        if filler >= 5:
+        # 필러 많음 (per-segment 기준이므로 임계값 낮춤)
+        if filler >= 3:
             self.consecutive_bad += 1
             self.consecutive_good = 0
             intensity = min(0.95, 0.4 + filler * 0.05)

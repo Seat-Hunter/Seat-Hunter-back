@@ -5,7 +5,7 @@ from deepgram import DeepgramClient, LiveTranscriptionEvents, LiveOptions
 from app.core.config import settings
 from app.core.redis_client import SessionRedis
 from app.core.websocket_manager import ws_manager
-from app.schemas.ws_message import make_final_transcript
+from app.schemas.ws_message import make_final_transcript, make_partial_transcript
 from app.repositories import speech_repository
 
 
@@ -34,7 +34,12 @@ class STTAggregator:
                 try:
                     alt = result.channel.alternatives[0]
                     text = alt.transcript.strip()
-                    if not text or not result.is_final:
+                    if not text:
+                        return
+                    if not result.is_final:
+                        await ws_manager.broadcast(
+                            self.session_id, make_partial_transcript(text)
+                        )
                         return
                     await self._on_final_transcript(text, result)
                 except Exception as e:

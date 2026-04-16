@@ -25,6 +25,9 @@ class AnswerStateMsg(BaseModel):
     question_id: str
     state: Literal["started", "ended"]
 
+def make_partial_transcript(text: str) -> dict:
+    return {"type": "partial_transcript", "text": text}
+
 def make_final_transcript(segment_id: str, text: str, start_ms: int, end_ms: int) -> dict:
     return {"type": "final_transcript", "segment_id": segment_id,
             "text": text, "start_ms": start_ms, "end_ms": end_ms}
