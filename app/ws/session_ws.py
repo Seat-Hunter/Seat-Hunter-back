@@ -132,14 +132,33 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                     previous_questions=previous_questions,
                 ))
                 previous_questions.append(question_result.question_text)
+                q_id = f"q_{len(previous_questions)}"
 
-                # 10. interrupt_question broadcast → TTS 자동 처리
+                # 10. interrupt_question broadcast
                 await ws_manager.broadcast(session_id, {
                     "type": "interrupt_question",
-                    "question_id": f"q_{len(previous_questions)}",
+                    "question_id": q_id,
                     "question_text": question_result.question_text,
                     "pressure_level": "medium",
                 })
+
+                # 11. TTS 생성 및 broadcast
+                await sr.set_tts_playing(True)
+                await sr.set_state(SessionState.INTERRUPTED)
+                await ws_manager.broadcast(session_id, make_session_state(SessionState.INTERRUPTED))
+                try:
+                    audio_bytes = await text_to_speech_bytes(question_result.question_text, "medium")
+                    audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+                    await ws_manager.broadcast(session_id, {
+                        "type": "tts_audio",
+                        "question_id": q_id,
+                        "question_text": question_result.question_text,
+                        "audio_base64": audio_b64,
+                        "format": "mp3",
+                    })
+                except Exception as e:
+                    print(f"[TTS 에러] {e}")
+                    await sr.set_tts_playing(False)
 
         except Exception as e:
             print(f"[분석 파이프라인 에러] {e}")
@@ -160,7 +179,14 @@ async def session_websocket(websocket: WebSocket, session_id: str):
 
             elif msg_type == "partial_transcript":
                 if not tts_playing:
-                    await stt.handle_partial(msg["text"])
+                    text = msg.get("text", "").strip()
+                    if msg.get("is_final") and text:
+                        # Web Speech API 최종 전사 → 인터럽트 파이프라인 실행
+                        ts = msg.get("timestamp_ms", int(time.time() * 1000))
+                        await sr.push_transcript(text)
+                        await on_final_transcript(text, ts, ts)
+                    else:
+                        await stt.handle_partial(text)
 
             elif msg_type == "vad_state":
                 if not tts_playing:
