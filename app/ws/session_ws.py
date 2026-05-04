@@ -73,6 +73,11 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                 silence_ms=analysis.silence_duration,
                 stress_score=analysis.stress_score,
             ))
+            
+            await ws_manager.broadcast(session_id, {
+                "type": "final_transcript",
+                "text": text,
+            })
 
             # 4. audience_reaction broadcast
             audience_payload = audience_service.evaluate(analysis)
