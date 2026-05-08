@@ -1,3 +1,4 @@
+import asyncio
 import json
 import base64
 import time
@@ -45,6 +46,12 @@ async def session_websocket(websocket: WebSocket, session_id: str):
     question_service = QuestionService()
     audience_service = AudienceService()
     previous_questions = []
+    current_question: str | None = None
+    answer_buffer: list[str] = []
+    follow_up_count: int = 0
+    answer_timer_task: asyncio.Task | None = None
+    MAX_FOLLOW_UPS = 2
+    ANSWER_SILENCE_SEC = 5
     await stt.start_deepgram()
 
     async def on_final_transcript(text: str, start_ms: int, end_ms: int):
@@ -122,8 +129,8 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                 await sr.set_last_interrupt_at(time.time())
                 recent_transcript = await sr.get_recent_transcript()
 
-                # 9. 질문 생성
-                question_result = question_service.generate_question(QuestionGenerationInput(
+                # 9. 질문 생성 (Gemini AI, 폴백: 룰 기반)
+                question_result = await question_service.generate_question_ai(QuestionGenerationInput(
                     current_topic=None,
                     recent_context=recent_transcript,
                     audience_type="professor",
@@ -132,6 +139,8 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                     previous_questions=previous_questions,
                 ))
                 previous_questions.append(question_result.question_text)
+                current_question = question_result.question_text
+                follow_up_count = 0
                 q_id = f"q_{len(previous_questions)}"
 
                 # 10. interrupt_question broadcast
@@ -163,6 +172,72 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         except Exception as e:
             print(f"[분석 파이프라인 에러] {e}")
 
+    async def resume_presentation():
+        nonlocal current_question, follow_up_count
+        current_question = None
+        follow_up_count = 0
+        await ws_manager.broadcast(session_id, {"type": "question_resolved"})
+        await sr.set_state(SessionState.RUNNING)
+        await ws_manager.broadcast(session_id, make_session_state(SessionState.RUNNING))
+
+    async def evaluate_and_maybe_follow_up():
+        nonlocal current_question, answer_buffer, follow_up_count, answer_timer_task
+        try:
+            await asyncio.sleep(ANSWER_SILENCE_SEC)
+        except asyncio.CancelledError:
+            return
+
+        user_answer = " ".join(answer_buffer).strip()
+        answer_buffer.clear()
+
+        if not user_answer or not current_question or follow_up_count >= MAX_FOLLOW_UPS:
+            await resume_presentation()
+            return
+
+        from app.schemas.question import AnswerEvaluationInput
+        eval_result = await question_service.evaluate_answer_ai(AnswerEvaluationInput(
+            question_text=current_question,
+            user_answer=user_answer,
+            recent_context=await sr.get_recent_transcript(),
+            pressure_level="medium",
+        ))
+
+        await ws_manager.broadcast(session_id, {
+            "type": "audience_reaction",
+            "reaction": eval_result.audience_reaction,
+        })
+
+        if eval_result.follow_up_needed and eval_result.follow_up_question:
+            follow_up_count += 1
+            current_question = eval_result.follow_up_question
+            q_id = f"follow_up_{follow_up_count}"
+
+            await ws_manager.broadcast(session_id, {
+                "type": "interrupt_question",
+                "question_id": q_id,
+                "question_text": eval_result.follow_up_question,
+                "is_follow_up": True,
+            })
+            await sr.set_tts_playing(True)
+            await sr.set_state(SessionState.INTERRUPTED)
+            await ws_manager.broadcast(session_id, make_session_state(SessionState.INTERRUPTED))
+            try:
+                audio_bytes = await text_to_speech_bytes(eval_result.follow_up_question, "medium")
+                audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+                await ws_manager.broadcast(session_id, {
+                    "type": "tts_audio",
+                    "question_id": q_id,
+                    "question_text": eval_result.follow_up_question,
+                    "audio_base64": audio_b64,
+                    "format": "mp3",
+                })
+            except Exception as e:
+                print(f"[꼬리질문 TTS 에러] {e}")
+                await sr.set_tts_playing(False)
+                await resume_presentation()
+        else:
+            await resume_presentation()
+
     stt.set_on_final_transcript(on_final_transcript)
 
     try:
@@ -181,10 +256,18 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                 if not tts_playing:
                     text = msg.get("text", "").strip()
                     if msg.get("is_final") and text:
-                        # Web Speech API 최종 전사 → 인터럽트 파이프라인 실행
                         ts = msg.get("timestamp_ms", int(time.time() * 1000))
-                        await sr.push_transcript(text)
-                        await on_final_transcript(text, ts, ts)
+                        current_state = await sr.get_state()
+                        if current_state == SessionState.ANSWERING:
+                            # 답변 수집 중 → 버퍼에 추가 후 침묵 타이머 재시작
+                            answer_buffer.append(text)
+                            if answer_timer_task and not answer_timer_task.done():
+                                answer_timer_task.cancel()
+                            answer_timer_task = asyncio.create_task(evaluate_and_maybe_follow_up())
+                        else:
+                            # 일반 발표 → 인터럽트 파이프라인
+                            await sr.push_transcript(text)
+                            await on_final_transcript(text, ts, ts)
                     else:
                         await stt.handle_partial(text)
 
@@ -195,11 +278,13 @@ async def session_websocket(websocket: WebSocket, session_id: str):
             elif msg_type == "tts_finished":
                 await sr.set_tts_playing(False)
                 current_state = await sr.get_state()
-                if current_state == SessionState.INTERRUPTED:
-                    await sr.set_state(SessionState.RUNNING)
-                    await ws_manager.broadcast(
-                        session_id, make_session_state(SessionState.RUNNING)
-                    )
+                if current_state in (SessionState.INTERRUPTED, SessionState.ANSWERING):
+                    # 질문 TTS 종료 → 답변 수집 시작 (5초 침묵 시 평가)
+                    await sr.set_state(SessionState.ANSWERING)
+                    await ws_manager.broadcast(session_id, make_session_state(SessionState.ANSWERING))
+                    if answer_timer_task and not answer_timer_task.done():
+                        answer_timer_task.cancel()
+                    answer_timer_task = asyncio.create_task(evaluate_and_maybe_follow_up())
 
             elif msg_type == "answer_state":
                 if msg.get("state") == "started":
