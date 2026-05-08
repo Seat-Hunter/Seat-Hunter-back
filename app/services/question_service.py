@@ -2,14 +2,25 @@
 # 이 서비스는 발표 유형, 청중 유형, 압박 강도, 최근 발표 맥락을 반영하여
 # 면접관형 질문을 만들고, 답변 품질을 평가하며, 후속 질문 필요 여부를 판단한다.
 
+import asyncio
+import json
 from typing import List
 
+from google import genai
+
+from app.core.config import settings
 from app.schemas.question import (
     QuestionGenerationInput,
     QuestionGenerationResult,
     AnswerEvaluationInput,
     AnswerEvaluationResult,
 )
+
+try:
+    _gemini_client = genai.Client(api_key=settings.gemini_api_key) if settings.gemini_api_key else None
+except Exception as _e:
+    print(f"[QuestionService Gemini 초기화 실패] {_e}")
+    _gemini_client = None
 
 
 class QuestionService:
@@ -22,6 +33,75 @@ class QuestionService:
     - 사용자 답변 평가
     - 후속 질문 생성
     """
+
+    async def generate_question_ai(self, data: QuestionGenerationInput) -> QuestionGenerationResult:
+        """Gemini로 맥락 기반 질문 생성. 실패 시 룰 기반 폴백."""
+        if _gemini_client is None:
+            return self.generate_question(data)
+
+        context = " ".join(data.recent_context[-3:]) if data.recent_context else "발표 시작"
+        prev_qs = "\n".join(f"- {q}" for q in data.previous_questions[-3:]) or "없음"
+
+        prompt = (
+            f"발표 맥락: \"{context}\"\n"
+            f"청중: {data.audience_type}, 압박 수준: {data.pressure_level}\n"
+            f"이전 질문:\n{prev_qs}\n\n"
+            "위 발표를 듣고 청중이 던질 날카로운 질문 1개를 한 문장으로만 생성하세요. "
+            "이전 질문과 겹치지 않게 하세요."
+        )
+
+        try:
+            result = await asyncio.to_thread(
+                _gemini_client.models.generate_content,
+                model="gemini-2.5-flash",
+                contents=prompt,
+            )
+            question_text = result.text.strip().splitlines()[0]
+            return QuestionGenerationResult(
+                question_text=question_text,
+                question_difficulty=self._select_question_difficulty(data.pressure_level),
+                question_type="ai_generated",
+            )
+        except Exception as e:
+            print(f"[Gemini 질문 생성 실패] {e} — 룰 기반 폴백")
+            return self.generate_question(data)
+
+    async def evaluate_answer_ai(self, data: AnswerEvaluationInput) -> AnswerEvaluationResult:
+        """Gemini로 답변 평가 및 꼬리질문 생성. 실패 시 룰 기반 폴백."""
+        if _gemini_client is None:
+            return self.evaluate_answer(data)
+
+        prompt = (
+            f"질문: {data.question_text}\n"
+            f"사용자 답변: {data.user_answer}\n\n"
+            "답변 품질을 평가하세요. JSON만 응답 (설명 없이):\n"
+            "{\"score\": 70, \"sufficient\": true, \"follow_up\": null}\n"
+            "또는 답변이 부족하면:\n"
+            "{\"score\": 35, \"sufficient\": false, \"follow_up\": \"꼬리질문 한 문장\"}\n\n"
+            "기준: score 60 이상이면 sufficient=true, 미만이면 false"
+        )
+
+        try:
+            result = await asyncio.to_thread(
+                _gemini_client.models.generate_content,
+                model="gemini-2.5-flash",
+                contents=prompt,
+            )
+            text = result.text.strip()
+            if text.startswith("```"):
+                text = text.split("```")[1].lstrip("json").strip()
+            parsed = json.loads(text)
+            score = float(parsed.get("score", 50))
+            return AnswerEvaluationResult(
+                answer_score=round(score, 2),
+                follow_up_needed=not parsed.get("sufficient", True),
+                audience_reaction=self._select_audience_reaction(score),
+                evaluation_reason="AI 평가 완료",
+                follow_up_question=parsed.get("follow_up"),
+            )
+        except Exception as e:
+            print(f"[Gemini 답변 평가 실패] {e} — 룰 기반 폴백")
+            return self.evaluate_answer(data)
 
     def generate_question(
         self,
