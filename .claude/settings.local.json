@@ -6,7 +6,16 @@
       "Bash(find /c -name \"python.exe\" -maxdepth 6)",
       "Bash(where redis-server *)",
       "Read(//c/Program Files/Redis//**)",
-      "Read(//c/Users/채령/scoop/apps/**)"
+      "Read(//c/Users/채령/scoop/apps/**)",
+      "Bash(python *)",
+      "Bash(venv\\\\Scripts\\\\python.exe *)",
+      "Bash(powershell *)",
+      "Bash(curl -s -X POST http://localhost:8000/api/v1/debug/report -H \"Content-Type: application/json\" -d \"null\")",
+      "Bash(dir C:\\\\code\\\\Seat-Hunter *)",
+      "Bash(dir C:\\\\code\\\\Seat-Hunter\\\\frontend\\\\src *)",
+      "Bash(dir C:\\\\code\\\\Seat-Hunter\\\\frontend\\\\src\\\\pages *)",
+      "Bash(dir C:\\\\code\\\\Seat-Hunter\\\\frontend\\\\src\\\\services *)",
+      "Bash(npm run *)"
     ]
   }
 }

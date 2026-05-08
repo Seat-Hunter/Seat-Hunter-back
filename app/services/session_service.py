@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from app.core.redis_client import SessionRedis
 from app.schemas.session import SessionState
@@ -25,12 +26,17 @@ class SessionService:
 
     async def end_session(self, session_id: str):
         sr = SessionRedis(session_id)
+        current_state = await sr.get_state()
+        if current_state == SessionState.FINISHED:
+            return
         await sr.set_state(SessionState.FINISHED)
         await session_repository.update_session_ended(session_id)
 
         # 리포트 자동 생성
         try:
+            print(f"[리포트] 생성 시작: {session_id}")
             metrics = await sr.get_metrics()
+            print(f"[리포트] metrics: {metrics}")
             report_service = ReportService()
 
             from app.schemas.report import SpeechMetricsSnapshot
@@ -53,7 +59,9 @@ class SessionService:
                 user_pattern=UserPatternInput(),
             )
 
-            result = report_service.generate_report(report_input)
+            print(f"[리포트] generate_report 호출 중...")
+            result = await asyncio.to_thread(report_service.generate_report, report_input)
+            print(f"[리포트] generate_report 완료. overall_score={result.overall_score}")
 
             await report_repository.insert_report(session_id, {
                 "avg_wpm": result.summary.avg_wpm,
@@ -66,8 +74,11 @@ class SessionService:
                 "improvements_json": result.improvements,
                 "curriculum_next": result.curriculum_next,
             })
+            print(f"[리포트] Supabase 저장 완료: {session_id}")
         except Exception as e:
-            print(f"[리포트 생성 에러] {e}")
+            import traceback
+            print(f"[리포트 생성 에러] {type(e).__name__}: {e}")
+            traceback.print_exc()
 
         await sr.delete_all()
 
