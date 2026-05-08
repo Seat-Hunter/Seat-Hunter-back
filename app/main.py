@@ -1,9 +1,21 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+
 from app.api import session, report, health
 from app.ws import session_ws
-from fastapi.staticfiles import StaticFiles
 from app.core.config import settings
+from app.api.auth import router as auth_router
+
+# DB 테이블 생성용 import
+from app.db.database import Base, engine
+from app.models.user import User
+
+
+# User 모델 기준으로 users 테이블 생성
+# 이미 테이블이 있으면 새로 만들지 않고 넘어감
+Base.metadata.create_all(bind=engine)
+
 
 app = FastAPI(
     title="Seat Hunter — Speech Simulation API",
@@ -18,8 +30,6 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
-# allow_origins=["*"] 과 allow_credentials=True 를 동시에 사용하면
-# 브라우저가 CORS preflight를 거부합니다. 명시적 오리진 목록을 사용합니다.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
@@ -32,5 +42,6 @@ app.include_router(session.router, prefix="/api/v1", tags=["Session"])
 app.include_router(report.router, prefix="/api/v1", tags=["Report"])
 app.include_router(health.router, tags=["Health"])
 app.include_router(session_ws.router, tags=["WebSocket"])
+app.include_router(auth_router)
 
 app.mount("/", StaticFiles(directory=".", html=True), name="static")
