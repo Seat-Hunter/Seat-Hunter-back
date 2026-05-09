@@ -5,6 +5,7 @@ __pycache__/
 .env
 .vscode/
 .idea/
+*.db
 .claude/
 .claude/settings.local.json
 /.claude
