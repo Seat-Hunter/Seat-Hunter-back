@@ -21,4 +21,5 @@ class ContextTrackerResult(BaseModel):
     current_topic: Optional[str]
     progress_index: float
     drift_score: float
+    topic_shift_detected: bool = False
     recent_context: List[str] = Field(default_factory=list)
