@@ -10,6 +10,16 @@ from app.schemas.auth import SignupRequest, LoginRequest, TokenResponse, UserRes
 from app.services.auth_service import signup, login
 from app.core.security import decode_access_token
 
+from app.schemas.auth import (
+    SignupRequest,
+    LoginRequest,
+    TokenResponse,
+    UserResponse,
+    FindPasswordRequest,
+    ResetPasswordRequest,
+)
+from app.services.auth_service import signup, login, find_password, reset_password
+
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 security = HTTPBearer()
@@ -35,6 +45,20 @@ def login_api(
         token_type="bearer",
     )
 
+@router.post("/find-password")
+def find_password_api(
+    request: FindPasswordRequest,
+    db: Session = Depends(get_db),
+):
+    return find_password(db, request)
+
+
+@router.post("/reset-password")
+def reset_password_api(
+    request: ResetPasswordRequest,
+    db: Session = Depends(get_db),
+):
+    return reset_password(db, request)
 
 @router.get("/me", response_model=UserResponse)
 def get_me(
@@ -67,3 +91,4 @@ def get_me(
         )
 
     return user
+
