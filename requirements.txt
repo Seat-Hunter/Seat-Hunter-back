@@ -18,3 +18,5 @@ idna==3.11
 typing-inspection==0.4.2
 typing_extensions==4.15.0
 google-genai==1.75.0
+python-dotenv
+psycopg2-binary
