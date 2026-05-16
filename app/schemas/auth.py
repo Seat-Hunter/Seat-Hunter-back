@@ -51,3 +51,29 @@ class UserResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class FindPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    email: EmailStr
+    new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_new_password(cls, password: str) -> str:
+        if len(password) < 8:
+            raise ValueError("비밀번호는 최소 8자 이상이어야 합니다.")
+
+        if not re.search(r"[A-Za-z]", password):
+            raise ValueError("비밀번호에는 영문자가 포함되어야 합니다.")
+
+        if not re.search(r"\d", password):
+            raise ValueError("비밀번호에는 숫자가 포함되어야 합니다.")
+
+        if not re.search(r"[!@#$%^&*(),.?\":{}|<>]", password):
+            raise ValueError("비밀번호에는 특수문자가 포함되어야 합니다.")
+
+        return password
