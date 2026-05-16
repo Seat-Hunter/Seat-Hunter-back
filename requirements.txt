@@ -21,3 +21,6 @@ google-genai==1.75.0
 bcrypt==4.0.1
 passlib[bcrypt]==1.7.4
 psycopg2-binary
+sqlalchemy
+email-validator
+python-jose[cryptography]
