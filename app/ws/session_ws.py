@@ -17,8 +17,6 @@ from app.schemas.session import SessionState
 from app.schemas.speech_analysis import SpeechAnalysisInput
 from app.schemas.interrupt import InterruptDecisionInput, SpeechMetricsInput, ContextStateInput
 from app.schemas.question import QuestionGenerationInput
-from app.schemas.context import ContextTrackerInput
-from app.services.context_tracker_service import ContextTrackerService
 
 router = APIRouter()
 session_service = SessionService()
@@ -47,19 +45,16 @@ async def session_websocket(websocket: WebSocket, session_id: str):
     interrupt_service = InterruptService()
     question_service = QuestionService()
     audience_service = AudienceService()
-    context_tracker = ContextTrackerService()
     previous_questions = []
     current_question: str | None = None
     answer_buffer: list[str] = []
     follow_up_count: int = 0
     answer_timer_task: asyncio.Task | None = None
-    presentation_style: str | None = None
     MAX_FOLLOW_UPS = 2
     ANSWER_SILENCE_SEC = 5
     await stt.start_deepgram()
 
     async def on_final_transcript(text: str, start_ms: int, end_ms: int):
-        nonlocal presentation_style, current_question, follow_up_count
         try:
             # 1. Speech Analysis
             analysis = speech_analyzer.analyze(SpeechAnalysisInput(
@@ -102,24 +97,14 @@ async def session_websocket(websocket: WebSocket, session_id: str):
             if await sr.get_tts_playing():
                 return
 
-            # 7. Context Tracker 업데이트
-            ctx_result = context_tracker.update(ContextTrackerInput(
-                transcript=text,
-                slide_texts=[],
-            ))
-
-            # 8. 발표 스타일 분석 (첫 발화 또는 topic shift 시 재분석)
-            if presentation_style is None or ctx_result.topic_shift_detected:
-                presentation_style = await question_service.analyze_presentation_style(text)
-
-            # 9. cooldown 계산
+            # 7. cooldown 계산
             last_interrupt = await sr.get_last_interrupt_at()
             cooldown_remaining = 0
             if last_interrupt:
                 elapsed = (time.time() - last_interrupt) * 1000
-                cooldown_remaining = max(0, 15000 - elapsed)
+                cooldown_remaining = max(0, 30000 - elapsed)
 
-            # 10. Interrupt 판단
+            # 8. Interrupt 판단
             interrupt_input = InterruptDecisionInput(
                 speech_metrics=SpeechMetricsInput(
                     recent_wpm=analysis.recent_wpm,
@@ -130,8 +115,8 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                     stress_score=analysis.stress_score,
                 ),
                 context_state=ContextStateInput(
-                    drift_score=ctx_result.drift_score,
-                    topic_shift_detected=ctx_result.topic_shift_detected,
+                    drift_score=0.0,
+                    topic_shift_detected=False,
                 ),
                 interrupt_enabled=True,
                 cooldown_remaining_ms=int(cooldown_remaining),
@@ -139,30 +124,32 @@ async def session_websocket(websocket: WebSocket, session_id: str):
             )
 
             decision = interrupt_service.decide(interrupt_input)
-            print(f"[INTERRUPT] should={decision.should_interrupt} triggered={decision.triggered_by} cooldown={cooldown_remaining:.0f}ms drift={ctx_result.drift_score:.2f}")
 
             if decision.should_interrupt:
                 await sr.set_last_interrupt_at(time.time())
                 recent_transcript = await sr.get_recent_transcript()
 
-                # 11. 질문 생성 (Gemini AI, 폴백: 룰 기반)
-                question_result = await question_service.generate_question_ai(
-                    QuestionGenerationInput(
-                        current_topic=ctx_result.current_topic,
-                        recent_context=recent_transcript,
-                        audience_type="professor",
-                        presentation_type="academic",
-                        pressure_level="medium",
-                        previous_questions=previous_questions,
-                    ),
-                    presentation_style=presentation_style or "general",
-                )
+                # 9. 질문 생성 (Gemini AI, 폴백: 룰 기반)
+                question_result = await question_service.generate_question_ai(QuestionGenerationInput(
+                    current_topic=None,
+                    recent_context=recent_transcript,
+                    audience_type="professor",
+                    presentation_type="academic",
+                    pressure_level="medium",
+                    previous_questions=previous_questions,
+                ))
                 previous_questions.append(question_result.question_text)
                 current_question = question_result.question_text
                 follow_up_count = 0
                 q_id = f"q_{len(previous_questions)}"
 
-                # 12. interrupt_question broadcast
+                # 인터럽트 로그를 Redis에 누적 저장 (세션 종료 시 DB 기록용)
+                _log_raw = await sr.r.get(f"session:{session_id}:interrupt_log")
+                _log = json.loads(_log_raw) if _log_raw else []
+                _log.append({"question_text": question_result.question_text, "reason": decision.reason})
+                await sr.r.set(f"session:{session_id}:interrupt_log", json.dumps(_log, ensure_ascii=False))
+
+                # 10. interrupt_question broadcast
                 await ws_manager.broadcast(session_id, {
                     "type": "interrupt_question",
                     "question_id": q_id,
@@ -170,7 +157,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                     "pressure_level": "medium",
                 })
 
-                # 13. TTS 생성 및 broadcast
+                # 11. TTS 생성 및 broadcast
                 await sr.set_tts_playing(True)
                 await sr.set_state(SessionState.INTERRUPTED)
                 await ws_manager.broadcast(session_id, make_session_state(SessionState.INTERRUPTED))
@@ -187,13 +174,9 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                 except Exception as e:
                     print(f"[TTS 에러] {e}")
                     await sr.set_tts_playing(False)
-                    await sr.set_state(SessionState.RUNNING)
-                    await ws_manager.broadcast(session_id, make_session_state(SessionState.RUNNING))
 
         except Exception as e:
-            import traceback
             print(f"[분석 파이프라인 에러] {e}")
-            traceback.print_exc()
 
     async def resume_presentation():
         nonlocal current_question, follow_up_count
@@ -289,7 +272,6 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                             answer_timer_task = asyncio.create_task(evaluate_and_maybe_follow_up())
                         else:
                             # 일반 발표 → 인터럽트 파이프라인
-                            print(f"[TRANSCRIPT] text='{text[:40]}' state={current_state}")
                             await sr.push_transcript(text)
                             await on_final_transcript(text, ts, ts)
                     else:

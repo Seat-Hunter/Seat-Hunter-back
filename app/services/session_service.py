@@ -1,13 +1,16 @@
 import asyncio
+import json
 import uuid
+
 from app.core.redis_client import SessionRedis
+from app.core.supabase_client import get_supabase
 from app.schemas.session import SessionState
-from app.repositories import session_repository, report_repository
 from app.services.report_service import ReportService
 from app.schemas.report import (
     ReportGenerationInput,
     RecoveryMetricsInput,
     UserPatternInput,
+    SpeechMetricsSnapshot,
 )
 
 
@@ -17,12 +20,25 @@ class SessionService:
         session_id = f"sess_{uuid.uuid4().hex[:12]}"
         sr = SessionRedis(session_id)
         await sr.set_state(SessionState.READY)
-        await session_repository.insert_session(session_id, config)
+
+        # config 전체를 Redis에 보관 (세션 종료 시 DB 저장에 사용)
+        await sr.r.set(f"session:{session_id}:config", json.dumps(config))
+
+        # presentation_histories에 초기 행 INSERT
+        sb = get_supabase()
+        sb.table("presentation_histories").insert({
+            "user_id":            config.get("user_id", 1),
+            "session_id":         session_id,
+            "title":              config.get("title"),
+            "presentation_type":  config.get("presentation_type"),
+            "audience_type":      config.get("audience_type"),
+            "duration_seconds":   config.get("duration_seconds"),
+        }).execute()
+
         return session_id
 
     async def start_session(self, session_id: str):
         await SessionRedis(session_id).set_state(SessionState.RUNNING)
-        await session_repository.update_session_started(session_id)
 
     async def end_session(self, session_id: str):
         sr = SessionRedis(session_id)
@@ -30,16 +46,15 @@ class SessionService:
         if current_state == SessionState.FINISHED:
             return
         await sr.set_state(SessionState.FINISHED)
-        await session_repository.update_session_ended(session_id)
 
-        # 리포트 자동 생성
         try:
             print(f"[리포트] 생성 시작: {session_id}")
             metrics = await sr.get_metrics()
-            print(f"[리포트] metrics: {metrics}")
-            report_service = ReportService()
 
-            from app.schemas.report import SpeechMetricsSnapshot
+            # 인터럽트 로그 수집
+            interrupt_raw = await sr.r.get(f"session:{session_id}:interrupt_log")
+            interrupt_list = json.loads(interrupt_raw) if interrupt_raw else []
+
             snapshot = SpeechMetricsSnapshot(
                 recent_wpm=metrics.get("current_wpm", 0),
                 average_wpm=metrics.get("current_wpm", 0),
@@ -48,6 +63,7 @@ class SessionService:
                 hesitation_score=0.0,
                 stress_score=metrics.get("stress_score", 0),
             )
+            silence_count = metrics.get("silence_count", 0)
 
             report_input = ReportGenerationInput(
                 speech_metrics=[snapshot],
@@ -59,22 +75,37 @@ class SessionService:
                 user_pattern=UserPatternInput(),
             )
 
-            print(f"[리포트] generate_report 호출 중...")
-            result = await asyncio.to_thread(report_service.generate_report, report_input)
-            print(f"[리포트] generate_report 완료. overall_score={result.overall_score}")
+            result = await asyncio.to_thread(ReportService().generate_report, report_input)
+            print(f"[리포트] 완료. overall_score={result.overall_score}")
 
-            await report_repository.insert_report(session_id, {
-                "avg_wpm": result.summary.avg_wpm,
-                "filler_count": result.summary.filler_count,
-                "interrupt_count": result.summary.interrupt_count,
+            # presentation_histories UPDATE (단일 테이블)
+            sb = get_supabase()
+            sb.table("presentation_histories").update({
+                "avg_wpm":        result.summary.avg_wpm,
+                "filler_count":   result.summary.filler_count,
+                "silence_count":  silence_count,
+                "interrupt_count": len(interrupt_list),
                 "recovery_score": result.recovery_score,
-                "overall_score": result.overall_score,
-                "strengths_json": result.strengths,
-                "weaknesses_json": result.weaknesses,
-                "improvements_json": result.improvements,
+                "overall_score":  result.overall_score,
+                "strengths":      json.dumps(result.strengths,    ensure_ascii=False),
+                "weaknesses":     json.dumps(result.weaknesses,   ensure_ascii=False),
+                "feedback":       json.dumps(result.improvements, ensure_ascii=False),
                 "curriculum_next": result.curriculum_next,
-            })
+                "interrupts":     json.dumps(interrupt_list,      ensure_ascii=False),
+            }).eq("session_id", session_id).execute()
+
             print(f"[리포트] Supabase 저장 완료: {session_id}")
+
+            # 프론트에 저장 완료 알림 (WS가 아직 열려있을 때만)
+            from app.core.websocket_manager import ws_manager
+            try:
+                await ws_manager.broadcast(session_id, {
+                    "type": "report_saved",
+                    "overall_score": result.overall_score,
+                })
+            except Exception:
+                pass  # WS 이미 끊긴 경우 무시
+
         except Exception as e:
             import traceback
             print(f"[리포트 생성 에러] {type(e).__name__}: {e}")

@@ -7,19 +7,9 @@ from app.ws import session_ws
 from app.core.config import settings
 from app.api.auth import router as auth_router
 
-# DB 테이블 생성용 import
-from app.db.database import Base, engine
-from app.models.user import User
-
-
-# User 모델 기준으로 users 테이블 생성
-# 이미 테이블이 있으면 새로 만들지 않고 넘어감
-Base.metadata.create_all(bind=engine)
-
-
 app = FastAPI(
-    title="Seat Hunter — Speech Simulation API",
-    version="0.1.0",
+    title="SpeechLab — Speech Simulation API",
+    version="0.2.0",
     description=(
         "AI 발표 트레이닝 시뮬레이터 백엔드.\n\n"
         "REST API로 세션을 생성/제어하고, WebSocket(`/ws/sessions/{session_id}`)으로 "
@@ -38,9 +28,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(session.router, prefix="/api/v1", tags=["Session"])
-app.include_router(report.router, prefix="/api/v1", tags=["Report"])
-app.include_router(health.router, tags=["Health"])
+app.include_router(session.router,  prefix="/api/v1", tags=["Session"])
+app.include_router(report.router,   prefix="/api/v1", tags=["Report"])
+app.include_router(health.router,   tags=["Health"])
 app.include_router(session_ws.router, tags=["WebSocket"])
 app.include_router(auth_router)
 
