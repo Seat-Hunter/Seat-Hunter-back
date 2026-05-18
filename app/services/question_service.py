@@ -34,7 +34,30 @@ class QuestionService:
     - 후속 질문 생성
     """
 
-    async def generate_question_ai(self, data: QuestionGenerationInput) -> QuestionGenerationResult:
+    async def analyze_presentation_style(self, context: str) -> str:
+        """발표 맥락을 분석해 어투·수준 라벨을 반환. 실패 시 'general'."""
+        if _gemini_client is None:
+            return "general"
+
+        prompt = (
+            f"발표: \"{context[:300]}\"\n"
+            "발표 어투·수준을 academic / professional / casual 중 하나로만 답해."
+        )
+        try:
+            result = await asyncio.to_thread(
+                _gemini_client.models.generate_content,
+                model="gemini-2.5-flash",
+                contents=prompt,
+            )
+            style = result.text.strip().lower().split()[0]
+            return style if style in ("academic", "professional", "casual") else "general"
+        except Exception as e:
+            print(f"[Gemini 스타일 분석 실패] {e}")
+            return "general"
+
+    async def generate_question_ai(
+        self, data: QuestionGenerationInput, presentation_style: str = "general"
+    ) -> QuestionGenerationResult:
         """Gemini로 맥락 기반 질문 생성. 실패 시 룰 기반 폴백."""
         if _gemini_client is None:
             return self.generate_question(data)
@@ -43,11 +66,14 @@ class QuestionService:
         prev_qs = "\n".join(f"- {q}" for q in data.previous_questions[-3:]) or "없음"
 
         prompt = (
-            f"발표 맥락: \"{context}\"\n"
-            f"청중: {data.audience_type}, 압박 수준: {data.pressure_level}\n"
-            f"이전 질문:\n{prev_qs}\n\n"
-            "위 발표를 듣고 청중이 던질 날카로운 질문 1개를 한 문장으로만 생성하세요. "
-            "이전 질문과 겹치지 않게 하세요."
+            f"발표자 발화: \"{context}\" [스타일: {presentation_style}]\n"
+            f"청중: {data.audience_type}, 압박: {data.pressure_level}\n"
+            f"이전 질문: {prev_qs}\n\n"
+            "발표 내용을 듣던 청중이 발표자에게 실제로 궁금한 점을 묻는 질문 1개를 한 문장으로만 써. "
+            "발표 내용과 직결된 구체적인 내용을 물어야 하며, 발표 흐름에서 자연스럽게 나올 법한 질문이어야 함. "
+            "억지로 날카롭거나 학술적으로 만들 필요 없음. "
+            "발표자 어투('여러분', '다들') 절대 사용 금지. "
+            "이전 질문과 겹치지 않게."
         )
 
         try:

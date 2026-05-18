@@ -20,7 +20,14 @@ typing_extensions==4.15.0
 google-genai==1.2.0
 bcrypt==4.0.1
 passlib[bcrypt]==1.7.4
+<<<<<<< HEAD
 # --- 하진님 세팅 중 추가된 필수 패키지 ---
 sqlalchemy==2.0.35
 pydantic[email]
 python-jose[cryptography]==3.3.0
+=======
+psycopg2-binary
+sqlalchemy
+email-validator
+python-jose[cryptography]
+>>>>>>> 4a2f1169b7753c9d9474d9523fc6f6d77c095389
