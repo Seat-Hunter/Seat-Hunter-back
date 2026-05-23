@@ -62,18 +62,24 @@ class QuestionService:
         if _gemini_client is None:
             return self.generate_question(data)
 
-        context = " ".join(data.recent_context[-3:]) if data.recent_context else "발표 시작"
+        context = " ".join(data.recent_context[-5:]) if data.recent_context else "발표 시작"
         prev_qs = "\n".join(f"- {q}" for q in data.previous_questions[-3:]) or "없음"
 
+        pressure_guide = {
+            "low":    "자연스러운 청중 호기심 질문",
+            "medium": "발표에서 빠진 근거나 구체적 수치를 요구하는 질문",
+            "high":   "논리 빈틈이나 근거 없는 가정을 직접 지적하는 압박 질문",
+        }.get(data.pressure_level, "발표 내용을 파고드는 질문")
+
         prompt = (
-            f"발표자 발화: \"{context}\" [스타일: {presentation_style}]\n"
+            f"발표 맥락: \"{context}\" [스타일: {presentation_style}]\n"
             f"청중: {data.audience_type}, 압박: {data.pressure_level}\n"
             f"이전 질문: {prev_qs}\n\n"
-            "발표 내용을 듣던 청중이 발표자에게 실제로 궁금한 점을 묻는 질문 1개를 한 문장으로만 써. "
-            "발표 내용과 직결된 구체적인 내용을 물어야 하며, 발표 흐름에서 자연스럽게 나올 법한 질문이어야 함. "
-            "억지로 날카롭거나 학술적으로 만들 필요 없음. "
-            "발표자 어투('여러분', '다들') 절대 사용 금지. "
-            "이전 질문과 겹치지 않게."
+            f"{pressure_guide}을 1개 만들어.\n"
+            "조건: 50자 내외 구어체 한 문장. "
+            "마크다운·별표·따옴표 사용 금지. "
+            "'설명해주세요' 단순 요청 금지. "
+            "이전 질문과 겹치지 않게. 질문 문장만 출력."
         )
 
         try:
