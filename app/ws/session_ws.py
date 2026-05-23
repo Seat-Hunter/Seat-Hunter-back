@@ -244,7 +244,11 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         else:
             await resume_presentation()
 
+    async def on_partial_transcript(text: str, start_ms: int, end_ms: int):
+        pass
+
     stt.set_on_final_transcript(on_final_transcript)
+    stt.set_on_partial_transcript(on_partial_transcript)
 
     try:
         while True:

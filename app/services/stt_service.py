@@ -16,6 +16,7 @@ class STTAggregator:
         self._segment_index = 0
         self._closed = False
         self._on_final_callback = None
+        self._on_partial_callback = None
 
     async def start_deepgram(self):
         try:
@@ -39,6 +40,11 @@ class STTAggregator:
                         await ws_manager.broadcast(
                             self.session_id, make_partial_transcript(text)
                         )
+                        if self._on_partial_callback:
+                            now_ms = int(time.time() * 1000)
+                            start_ms = int(result.start * 1000) if hasattr(result, "start") else now_ms
+                            duration_ms = int(result.duration * 1000) if hasattr(result, "duration") else 0
+                            await self._on_partial_callback(text, start_ms, start_ms + duration_ms)
                         return
                     await self._on_final_transcript(text, result)
                 except Exception as e:
@@ -99,3 +105,6 @@ class STTAggregator:
 
     def set_on_final_transcript(self, callback):
         self._on_final_callback = callback
+
+    def set_on_partial_transcript(self, callback):
+        self._on_partial_callback = callback
