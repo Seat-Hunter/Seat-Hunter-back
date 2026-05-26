@@ -27,3 +27,6 @@ psycopg2-binary
 email-validator
 pydantic[email]
 python-jose[cryptography]==3.3.0
+
+openai==2.36.0
+python-dotenv==1.1.0
