@@ -5,6 +5,7 @@ from deepgram import DeepgramClient, LiveTranscriptionEvents, LiveOptions
 from app.core.config import settings
 from app.core.redis_client import SessionRedis
 from app.core.websocket_manager import ws_manager
+from app.core.supabase_client import get_supabase
 from app.schemas.ws_message import make_final_transcript, make_partial_transcript
 
 
@@ -65,6 +66,19 @@ class STTAggregator:
         end_ms = start_ms + duration_ms
 
         await self.sr.push_transcript(text)
+
+        # Supabase scripts 테이블에 저장
+        try:
+            sb = get_supabase()
+            sb.table("scripts").insert({
+                "session_id":    self.session_id,
+                "transcript":    text,
+                "start_ms":      start_ms,
+                "end_ms":        end_ms,
+                "segment_index": self._segment_index,
+            }).execute()
+        except Exception as e:
+            print(f"[scripts 저장 에러] {e}")
 
         self._segment_index += 1
         await ws_manager.broadcast(
