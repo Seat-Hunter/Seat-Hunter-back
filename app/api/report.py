@@ -27,6 +27,15 @@ async def get_report(session_id: str):
         raise HTTPException(status_code=404, detail="리포트 없음. 세션이 종료되지 않았거나 생성 전입니다.")
 
     row = res.data[0]
+
+    # scripts 조회
+    scripts_res = sb.table("scripts") \
+        .select("transcript, start_ms, end_ms, segment_index, timestamp") \
+        .eq("session_id", session_id) \
+        .order("segment_index") \
+        .execute()
+    full_script = " ".join([s["transcript"] for s in scripts_res.data]) if scripts_res.data else ""
+
     return {
         "session_id":         row["session_id"],
         "presentation_type":  row.get("presentation_type"),
@@ -44,6 +53,28 @@ async def get_report(session_id: str):
         "curriculum_next":    row.get("curriculum_next"),
         "interrupts":         _parse_json_field(row.get("interrupts")),
         "created_at":         row.get("created_at"),
+        "script_segments":    scripts_res.data,
+        "full_script":        full_script,
+    }
+
+
+@router.get(
+    "/sessions/{session_id}/scripts",
+    summary="세션 대본 조회",
+)
+async def get_session_scripts(session_id: str):
+    sb = get_supabase()
+    res = sb.table("scripts") \
+        .select("transcript, start_ms, end_ms, segment_index, timestamp") \
+        .eq("session_id", session_id) \
+        .order("segment_index") \
+        .execute()
+    if not res.data:
+        raise HTTPException(status_code=404, detail="스크립트가 없습니다.")
+    return {
+        "session_id":  session_id,
+        "segments":    res.data,
+        "full_script": " ".join([s["transcript"] for s in res.data]),
     }
 
 

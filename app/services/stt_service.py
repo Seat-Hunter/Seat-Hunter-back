@@ -5,6 +5,7 @@ from deepgram import DeepgramClient, LiveTranscriptionEvents, LiveOptions
 from app.core.config import settings
 from app.core.redis_client import SessionRedis
 from app.core.websocket_manager import ws_manager
+from app.core.supabase_client import get_supabase
 from app.schemas.ws_message import make_final_transcript, make_partial_transcript
 
 
@@ -16,7 +17,6 @@ class STTAggregator:
         self._segment_index = 0
         self._closed = False
         self._on_final_callback = None
-        self._on_partial_callback = None
 
     async def start_deepgram(self):
         try:
@@ -40,11 +40,6 @@ class STTAggregator:
                         await ws_manager.broadcast(
                             self.session_id, make_partial_transcript(text)
                         )
-                        if self._on_partial_callback:
-                            now_ms = int(time.time() * 1000)
-                            start_ms = int(result.start * 1000) if hasattr(result, "start") else now_ms
-                            duration_ms = int(result.duration * 1000) if hasattr(result, "duration") else 0
-                            await self._on_partial_callback(text, start_ms, start_ms + duration_ms)
                         return
                     await self._on_final_transcript(text, result)
                 except Exception as e:
@@ -71,6 +66,19 @@ class STTAggregator:
         end_ms = start_ms + duration_ms
 
         await self.sr.push_transcript(text)
+
+        # Supabase scripts 테이블에 저장
+        try:
+            sb = get_supabase()
+            sb.table("scripts").insert({
+                "session_id":    self.session_id,
+                "transcript":    text,
+                "start_ms":      start_ms,
+                "end_ms":        end_ms,
+                "segment_index": self._segment_index,
+            }).execute()
+        except Exception as e:
+            print(f"[scripts 저장 에러] {e}")
 
         self._segment_index += 1
         await ws_manager.broadcast(
@@ -105,6 +113,3 @@ class STTAggregator:
 
     def set_on_final_transcript(self, callback):
         self._on_final_callback = callback
-
-    def set_on_partial_transcript(self, callback):
-        self._on_partial_callback = callback
