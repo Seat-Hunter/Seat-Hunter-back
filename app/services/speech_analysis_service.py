@@ -29,7 +29,7 @@ class SpeechAnalysisService:
         self.last_interrupt_time = None
         self.previous_wpm = 0
 
-    def analyze(self, data: SpeechAnalysisInput) -> SpeechAnalysisResult:
+    async def analyze(self, data: SpeechAnalysisInput) -> SpeechAnalysisResult:
         """발화 데이터를 분석하여 지표를 반환"""
 
         text = data.text
@@ -42,7 +42,7 @@ class SpeechAnalysisService:
         average_wpm = self.wpm_calculator.get_average_wpm(end_ms)
 
         # 2. 필러 계산
-        filler_count_segment = self.filler_detector.count_fillers(text)
+        filler_count_segment = await self.filler_detector.count_fillers(text)
         self.total_fillers += filler_count_segment
 
         # 3. 침묵 계산
@@ -70,10 +70,14 @@ class SpeechAnalysisService:
         )
 
         # 7. Stress Score 계산 — per-segment 필러와 WPM 변화량 기반
-        wpm_change = abs(recent_wpm - self.previous_wpm)
+        # 첫 세그먼트는 previous_wpm=0 이므로 WPM 변화량 제외
+        if self.previous_wpm == 0:
+            wpm_change = 0
+        else:
+            wpm_change = abs(recent_wpm - self.previous_wpm)
         stress_score = min(
             1.0,
-            (wpm_change * 0.02) + (filler_count_segment * 0.15)
+            (wpm_change * 0.01) + (filler_count_segment * 0.2)
         )
         self.previous_wpm = recent_wpm
 

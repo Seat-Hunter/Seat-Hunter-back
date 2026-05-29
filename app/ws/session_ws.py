@@ -23,13 +23,13 @@ session_service = SessionService()
 
 
 def _generate_feedback(analysis) -> str | None:
-    if analysis.recent_wpm > 170:
+    if analysis.recent_wpm > 160:
         return "말속도가 너무 빠릅니다. 천천히 말씀해보세요."
     if 0 < analysis.recent_wpm < 60:
         return "말속도가 너무 느립니다. 조금 더 빠르게 말씀해보세요."
     if analysis.filler_count_segment >= 3:
         return "필러 단어가 늘고 있습니다. 잠깐 멈추고 정리 후 말씀해보세요."
-    if analysis.stress_score > 0.7:
+    if analysis.stress_score > 0.85:
         return "긴장이 감지됩니다. 천천히 호흡하고 말씀해보세요."
     if analysis.current_silence_ms > 4000:
         return "침묵이 길어지고 있습니다. 다음 내용을 이어가보세요."
@@ -57,7 +57,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
     async def on_final_transcript(text: str, start_ms: int, end_ms: int):
         try:
             # 1. Speech Analysis
-            analysis = speech_analyzer.analyze(SpeechAnalysisInput(
+            analysis = await speech_analyzer.analyze(SpeechAnalysisInput(
                 text=text,
                 start_ms=start_ms,
                 end_ms=end_ms,
