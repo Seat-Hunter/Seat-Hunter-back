@@ -67,10 +67,12 @@ async def session_websocket(websocket: WebSocket, session_id: str):
 
             # 2. Redis 메트릭 업데이트
             await sr.set_metrics({
-                "current_wpm": analysis.recent_wpm,
+                "current_wpm":        analysis.recent_wpm,
+                "average_wpm":        analysis.average_wpm,
                 "filler_count_recent": analysis.filler_count,
-                "silence_ms": analysis.silence_duration,
-                "stress_score": analysis.stress_score,
+                "silence_ms":         analysis.silence_duration,
+                "silence_count":      analysis.silence_count,
+                "stress_score":       analysis.stress_score,
             })
 
             # 3. live_metrics broadcast

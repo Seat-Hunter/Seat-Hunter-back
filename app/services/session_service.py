@@ -57,7 +57,7 @@ class SessionService:
 
             snapshot = SpeechMetricsSnapshot(
                 recent_wpm=metrics.get("current_wpm", 0),
-                average_wpm=metrics.get("current_wpm", 0),
+                average_wpm=metrics.get("average_wpm", metrics.get("current_wpm", 0)),
                 filler_count=metrics.get("filler_count_recent", 0),
                 silence_duration=metrics.get("silence_ms", 0),
                 hesitation_score=0.0,

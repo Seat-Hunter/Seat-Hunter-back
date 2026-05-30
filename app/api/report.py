@@ -28,6 +28,11 @@ async def get_report(session_id: str):
 
     row = res.data[0]
 
+    # overall_score가 NULL(0) 이면 end_session()이 아직 완료되지 않은 것.
+    # Supabase 테이블 DEFAULT가 0인 경우 NULL 대신 0이 오므로 둘 다 처리.
+    if not row.get("overall_score"):
+        raise HTTPException(status_code=404, detail="리포트 생성 중입니다. 잠시 후 다시 시도하세요.")
+
     # scripts 조회
     scripts_res = sb.table("scripts") \
         .select("transcript, start_ms, end_ms, segment_index, timestamp") \
