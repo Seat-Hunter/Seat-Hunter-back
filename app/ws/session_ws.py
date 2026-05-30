@@ -327,7 +327,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
 
     except WebSocketDisconnect:
         current_state = await sr.get_state()
-        if current_state not in [SessionState.FINISHED, None]:
+        if current_state not in [SessionState.FINISHED, SessionState.CANCELLED, None]:
             print(f"[WS 끊김] 세션 {session_id} 자동 종료")
             await session_service.end_session(session_id)
     except Exception as e:

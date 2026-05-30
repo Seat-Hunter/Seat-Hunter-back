@@ -13,6 +13,7 @@ class SessionState(str, Enum):
     INTERRUPTED = "INTERRUPTED"
     ANSWERING = "ANSWERING"
     FINISHED = "FINISHED"
+    CANCELLED = "CANCELLED"
 
 class SessionCreateRequest(BaseModel):
     user_id: int

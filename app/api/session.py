@@ -42,3 +42,16 @@ async def start_session(session_id: str):
 async def end_session(session_id: str):
     await service.end_session(session_id)
     return {"session_id": session_id, "state": SessionState.FINISHED}
+
+
+@router.post(
+    "/sessions/{session_id}/cancel",
+    summary="세션 취소",
+    description=(
+        "발표를 중간에 취소합니다. "
+        "저장된 STT 대본과 발표 이력이 모두 삭제되며 리포트는 생성되지 않습니다."
+    ),
+)
+async def cancel_session(session_id: str):
+    await service.cancel_session(session_id)
+    return {"session_id": session_id, "state": SessionState.CANCELLED}

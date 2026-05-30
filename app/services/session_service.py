@@ -113,6 +113,27 @@ class SessionService:
 
         await sr.delete_all()
 
+    async def cancel_session(self, session_id: str):
+        sr = SessionRedis(session_id)
+        current_state = await sr.get_state()
+        if current_state == SessionState.CANCELLED:
+            return
+        await sr.set_state(SessionState.CANCELLED)
+
+        # 타이밍상 end_session()이 먼저 실행돼 FINISHED 상태가 됐어도
+        # 명시적 취소이므로 DB 기록은 무조건 삭제한다
+        sb = get_supabase()
+        try:
+            sb.table("scripts").delete().eq("session_id", session_id).execute()
+        except Exception as e:
+            print(f"[취소] scripts 삭제 실패: {e}")
+        try:
+            sb.table("presentation_histories").delete().eq("session_id", session_id).execute()
+        except Exception as e:
+            print(f"[취소] presentation_histories 삭제 실패: {e}")
+
+        await sr.delete_all()
+
     async def transition_state(self, session_id: str, new_state: SessionState):
         await SessionRedis(session_id).set_state(new_state)
 
