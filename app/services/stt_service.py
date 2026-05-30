@@ -1,7 +1,7 @@
 import asyncio
 import base64
 import time
-from deepgram import DeepgramClient, LiveTranscriptionEvents, LiveOptions
+from deepgram import DeepgramClient, DeepgramClientOptions, LiveTranscriptionEvents, LiveOptions
 from app.core.config import settings
 from app.core.redis_client import SessionRedis
 from app.core.websocket_manager import ws_manager
@@ -17,10 +17,16 @@ class STTAggregator:
         self._segment_index = 0
         self._closed = False
         self._on_final_callback = None
+        self._on_partial_callback = None
 
     async def start_deepgram(self):
         try:
-            client = DeepgramClient(settings.deepgram_api_key)
+            # keepalive=True: SDK 내장 루프가 5초마다 KeepAlive 메시지를 전송해
+            # Deepgram의 10초 타임아웃(NET-0001)을 방지한다
+            client = DeepgramClient(
+                settings.deepgram_api_key,
+                config=DeepgramClientOptions(options={"keepalive": True}),
+            )
             options = LiveOptions(
                 model="nova-2",
                 language="ko",
@@ -40,6 +46,12 @@ class STTAggregator:
                         await ws_manager.broadcast(
                             self.session_id, make_partial_transcript(text)
                         )
+                        if self._on_partial_callback:
+                            try:
+                                now_ms = int(time.time() * 1000)
+                                await self._on_partial_callback(text, now_ms, now_ms)
+                            except Exception as e:
+                                print(f"[STT partial 콜백 에러] {e}")
                         return
                     await self._on_final_transcript(text, result)
                 except Exception as e:
@@ -113,3 +125,6 @@ class STTAggregator:
 
     def set_on_final_transcript(self, callback):
         self._on_final_callback = callback
+
+    def set_on_partial_transcript(self, callback):
+        self._on_partial_callback = callback
