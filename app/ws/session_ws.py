@@ -411,7 +411,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         nonlocal answer_buffer
 
         try:
-            analysis = speech_analyzer.analyze(SpeechAnalysisInput(
+            analysis = await speech_analyzer.analyze(SpeechAnalysisInput(
                 text=text,
                 start_ms=start_ms,
                 end_ms=end_ms,
