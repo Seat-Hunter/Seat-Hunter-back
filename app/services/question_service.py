@@ -66,6 +66,11 @@ class QuestionService:
         - 질문은 1개만 생성
         - 너무 길거나 복합적인 질문은 피함
         - 발표자가 뒤에서 설명할 수 있는 내용은 단정적으로 공격하지 않음
+        - 첫 질문 후 사용자 답변 평가 후, 답변이 부족하다 판단되면
+        - 사용자 답변 평가 후, 답변이 부족하다 판단되면 꼬리질문 생성
+        - 꼬리질문은 최대 2번까지만 생성 가능
+        - 꼬리질문은 사용자의 답변을 바탕으로 자연스럽게 이어지도록 생성
+        - 모든 질문은 존댓말로 할것
         """
         if _openai_client is None:
             return self.generate_question(data)
@@ -136,6 +141,21 @@ class QuestionService:
 
         recent_context = " ".join(data.recent_context[-2:]) if data.recent_context else "없음"
 
+        follow_up_count = getattr(data, "follow_up_count", 0)
+        max_follow_ups = getattr(data, "max_follow_ups", 2)
+
+        try:
+            follow_up_count = int(follow_up_count)
+        except Exception:
+            follow_up_count = 0
+
+        try:
+            max_follow_ups = int(max_follow_ups)
+        except Exception:
+            max_follow_ups = 2
+
+        can_generate_follow_up = follow_up_count < max_follow_ups
+
         prompt = f"""
 너는 발표 Q&A 상황에서 발표자의 답변을 평가하는 평가자다.
 질문에 대해 사용자의 답변이 충분한지 판단해라.
@@ -151,6 +171,11 @@ class QuestionService:
 
 [최근 발표 맥락]
 {recent_context}
+
+[꼬리질문 상태]
+- 현재 꼬리질문 횟수: {follow_up_count}
+- 최대 꼬리질문 횟수: {max_follow_ups}
+- 꼬리질문 생성 가능 여부: {can_generate_follow_up}
 
 평가 기준:
 - 질문에 직접 답했는가?
@@ -176,12 +201,14 @@ class QuestionService:
 }}
 
 규칙:
-- score는 0부터 100 사이 숫자다.
-- score가 60 이상이면 sufficient는 true다.
-- score가 60 미만이면 sufficient는 false다.
-- sufficient가 false이면 follow_up에 짧은 꼬리질문을 작성한다.
+- score가 70 이상이면 sufficient는 true다.
+- score가 70 미만이면 sufficient는 false다.
+- 꼬리질문 생성 가능 여부가 false이면 follow_up은 반드시 null이다.
+- sufficient가 false이고 꼬리질문 생성 가능 여부가 true이면 follow_up에 짧은 꼬리질문을 작성한다.
 - sufficient가 true이면 follow_up은 null이다.
-- JSON 바깥에 설명을 쓰지 않는다.
+- follow_up은 사용자의 답변에서 부족한 부분을 자연스럽게 되묻는 질문이어야 한다.
+- follow_up은 새로운 주제를 꺼내지 않는다.
+- follow_up은 한 문장으로만 작성한다.
 """.strip()
 
         try:
@@ -201,8 +228,17 @@ class QuestionService:
             score = float(parsed.get("score", 50))
             score = max(0.0, min(score, 100.0))
 
-            sufficient = bool(parsed.get("sufficient", score >= 60))
+            sufficient = bool(parsed.get("sufficient", score >= 70))
             follow_up = parsed.get("follow_up")
+
+            follow_up_needed = (
+                not sufficient
+                and score < 70
+                and follow_up_count < max_follow_ups
+            )
+
+            if not follow_up_needed:
+                follow_up = None
 
             if follow_up:
                 follow_up = self._clean_generated_question(str(follow_up))
@@ -210,7 +246,7 @@ class QuestionService:
 
             return AnswerEvaluationResult(
                 answer_score=round(score, 2),
-                follow_up_needed=not sufficient,
+                follow_up_needed=follow_up_needed,
                 audience_reaction=self._select_audience_reaction(score),
                 evaluation_reason="AI 평가 완료",
                 follow_up_question=follow_up,
