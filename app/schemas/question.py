@@ -1,6 +1,3 @@
-# Question Engine에서 사용하는 입력 및 출력 데이터 구조를 정의하는 스키마 파일
-# 이 파일은 질문 생성, 추가 질문 생성, 사용자 답변 평가에 필요한 데이터 형식을 정의한다.
-
 from typing import List, Optional
 from pydantic import BaseModel, Field
 
@@ -33,25 +30,38 @@ class QuestionGenerationResult(BaseModel):
     - question_type: clarification / logic_probe / detail_probe / challenge
     """
     question_text: str
-    question_difficulty: str
-    question_type: str
+    question_difficulty: str = "medium"
+    question_type: str = "clarification"
 
 
 class AnswerEvaluationInput(BaseModel):
     """
     사용자 답변 평가 입력 데이터
 
+    - question_id: 현재 질문 ID
+    - parent_question_id: 원 질문 ID
     - question_text: 이전에 던진 질문
-    - user_answer: 사용자 답변
+    - user_answer: 사용자 답변 전체
     - current_topic: 현재 주제
     - recent_context: 최근 발표 맥락
     - pressure_level: 압박 강도
+    - is_follow_up: 꼬리질문 여부
+    - follow_up_count: 현재 꼬리질문 회차
+    - max_follow_ups: 최대 꼬리질문 횟수
     """
+    question_id: Optional[str] = None
+    parent_question_id: Optional[str] = None
+
     question_text: str
     user_answer: str
+
     current_topic: Optional[str] = None
     recent_context: List[str] = Field(default_factory=list)
     pressure_level: str = "medium"
+
+    is_follow_up: bool = False
+    follow_up_count: int = 0
+    max_follow_ups: int = 2
 
 
 class AnswerEvaluationResult(BaseModel):
