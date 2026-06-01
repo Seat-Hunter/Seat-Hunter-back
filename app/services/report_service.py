@@ -149,10 +149,10 @@ class ReportService:
         import threading
         t = threading.Thread(target=_call, daemon=True)
         t.start()
-        t.join(timeout=15)
+        t.join()
 
-        if t.is_alive():
-            print("[Gemini 피드백 오류] 시간 초과 (15초) — 규칙 기반 폴백")
+        if error_box[0] is None and result_box[0] is None:
+            print("[Gemini 피드백 오류] 결과 없음 — 규칙 기반 폴백")
             return None
 
         if error_box[0] is not None:

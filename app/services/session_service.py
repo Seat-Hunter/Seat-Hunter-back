@@ -43,15 +43,18 @@ class SessionService:
     async def end_session(self, session_id: str):
         sr = SessionRedis(session_id)
         current_state = await sr.get_state()
+        print(f"[end_session] 호출됨. session_id={session_id}, current_state={current_state}")
+
         if current_state == SessionState.FINISHED:
+            print(f"[end_session] 이미 FINISHED 상태 → 스킵")
             return
         await sr.set_state(SessionState.FINISHED)
 
         try:
             print(f"[리포트] 생성 시작: {session_id}")
             metrics = await sr.get_metrics()
+            print(f"[리포트] metrics={metrics}")
 
-            # 인터럽트 로그 수집
             interrupt_raw = await sr.r.get(f"session:{session_id}:interrupt_log")
             interrupt_list = json.loads(interrupt_raw) if interrupt_raw else []
 
@@ -76,11 +79,10 @@ class SessionService:
             )
 
             result = await asyncio.to_thread(ReportService().generate_report, report_input)
-            print(f"[리포트] 완료. overall_score={result.overall_score}")
+            print(f"[리포트] 생성 완료. overall_score={result.overall_score}")
 
-            # presentation_histories UPDATE (단일 테이블)
             sb = get_supabase()
-            sb.table("presentation_histories").update({
+            update_res = sb.table("presentation_histories").update({
                 "avg_wpm":        result.summary.avg_wpm,
                 "filler_count":   result.summary.filler_count,
                 "silence_count":  silence_count,
@@ -94,17 +96,10 @@ class SessionService:
                 "interrupts":     json.dumps(interrupt_list,      ensure_ascii=False),
             }).eq("session_id", session_id).execute()
 
-            print(f"[리포트] Supabase 저장 완료: {session_id}")
-
-            # 프론트에 저장 완료 알림 (WS가 아직 열려있을 때만)
-            from app.core.websocket_manager import ws_manager
-            try:
-                await ws_manager.broadcast(session_id, {
-                    "type": "report_saved",
-                    "overall_score": result.overall_score,
-                })
-            except Exception:
-                pass  # WS 이미 끊긴 경우 무시
+            if update_res.data:
+                print(f"[리포트] Supabase 저장 완료: {session_id}")
+            else:
+                print(f"[리포트] Supabase UPDATE 매칭 행 없음 — session_id={session_id}가 DB에 없을 수 있습니다.")
 
         except Exception as e:
             import traceback
