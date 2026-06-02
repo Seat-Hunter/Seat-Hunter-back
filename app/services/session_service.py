@@ -81,9 +81,13 @@ class SessionService:
             result = await asyncio.to_thread(ReportService().generate_report, report_input)
             print(f"[리포트] 생성 완료. overall_score={result.overall_score}")
 
+            # presentation_histories UPDATE (단일 테이블)
+            # presentation_histories UPDATE (단일 테이블)
             sb = get_supabase()
+            
+            # 💡 [복구 완료]: 지워졌던 update_res = 변수 선언부를 다시 앞에 붙여주었습니다.
             update_res = sb.table("presentation_histories").update({
-                "avg_wpm":        result.summary.avg_wpm,
+                "avg_wpm":         result.summary.avg_wpm,
                 "filler_count":   result.summary.filler_count,
                 "silence_count":  silence_count,
                 "interrupt_count": len(interrupt_list),
@@ -95,7 +99,6 @@ class SessionService:
                 "curriculum_next": result.curriculum_next,
                 "interrupts":     json.dumps(interrupt_list,      ensure_ascii=False),
             }).eq("session_id", session_id).execute()
-
 
             if update_res.data:
                 print(f"[리포트] Supabase 저장 완료: {session_id}")
