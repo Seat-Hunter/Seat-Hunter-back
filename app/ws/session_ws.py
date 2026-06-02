@@ -90,10 +90,6 @@ async def session_websocket(websocket: WebSocket, session_id: str):
     # 마지막 답변 조각 이후 이 시간 동안 추가 답변이 없으면 평가
     ANSWER_SILENCE_SEC = 3.0
 
-    # 답변 시작 후 최소 수집 시간
-    # 너무 짧은 조각 하나만 평가되는 문제 방지
-    MIN_ANSWER_COLLECT_SEC = 6.0
-
     # 질문 후 사용자가 아예 답변하지 않을 때 기다리는 최대 시간
     NO_ANSWER_TIMEOUT_SEC = 12.0
 
@@ -636,17 +632,6 @@ async def session_websocket(websocket: WebSocket, session_id: str):
 
             if silence_after_last_answer < ANSWER_SILENCE_SEC:
                 print("[답변 평가 보류] 아직 답변이 이어지는 중입니다.")
-                await start_answer_timer()
-                return
-
-        if answer_started_at is not None:
-            answer_collect_elapsed = now - answer_started_at
-
-            if answer_collect_elapsed < MIN_ANSWER_COLLECT_SEC:
-                print(
-                    f"[답변 평가 보류] 최소 수집 시간 미달: "
-                    f"{answer_collect_elapsed:.1f}/{MIN_ANSWER_COLLECT_SEC}s"
-                )
                 await start_answer_timer()
                 return
 
