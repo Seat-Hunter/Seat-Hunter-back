@@ -939,7 +939,6 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                 await safe_set_tts_playing(False)
 
                 try:
-                    await sr.set_state(SessionState.FINISHED)
                     await session_service.end_session(session_id)
                 except Exception as e:
                     print(f"[세션 종료 처리 에러] {e}")
