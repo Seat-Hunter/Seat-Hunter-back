@@ -95,44 +95,64 @@ class ReportService:
         if _gemini_client is None:
             return None
 
-        transcript_text = " ".join(seg.text for seg in data.transcript[:10])
+        transcript_text = data.transcript_text or " ".join(seg.text for seg in data.transcript[:20])
 
         qa_lines = []
-        for item in data.answer_evaluation_log[:5]:
+        for item in data.answer_evaluation_log:
             qa_lines.append(
-                f"Q: {item.question_text}\nA: {item.user_answer}\n점수: {item.answer_score}"
+                f"Q: {item.question_text}\nA: {item.user_answer}\n점수: {item.answer_score}/100"
             )
 
-        prompt = f"""당신은 발표 코칭 전문가입니다. 아래 발표 세션 데이터를 분석해 피드백을 작성하세요.
+        script_section = ""
+        if data.script_text:
+            script_section = f"""
+## 준비 대본
+{data.script_text[:800]}
 
-## 세션 통계
-- 평균 WPM: {summary.avg_wpm}
-- 최고 WPM: {summary.max_wpm}
-- 필러 단어 횟수: {summary.filler_count}회
+## 발표 평가 기준
+실제 발화 내용을 준비 대본과 비교하여:
+- 대본 내용이 제대로 전달됐는지
+- 핵심 포인트가 빠지지 않았는지
+- 발표다운 어조와 구성인지를 평가하세요.
+발화 내용이 대본과 너무 다르거나 극히 짧다면 "발표를 제대로 수행하지 않았다"고 명시하세요."""
+
+        transcript_section = transcript_text if transcript_text.strip() else "발화 내용 없음 (마이크 미사용 또는 발화량 극히 적음)"
+
+        transcript_word_count = len(transcript_text.split()) if transcript_text.strip() else 0
+        is_empty_presentation = transcript_word_count < 10
+
+        prompt = f"""당신은 발표 코칭 전문가입니다. 아래 데이터를 분석해 발표자가 "왜 이 결과가 나왔는지"와 "어떻게 개선할 수 있는지"를 명확히 이해할 수 있는 피드백을 작성하세요.
+
+## 세션 지표
+- 평균 WPM: {summary.avg_wpm} (적정: 100~160)
+- 필러 단어: {summary.filler_count}회 (5회 이상이면 유창성 저하)
 - 침묵 구간: {summary.silence_count}회
-- 인터럽트 횟수: {summary.interrupt_count}회
-- 평균 답변 점수: {summary.avg_answer_score}/100
+- 돌발 질문: {summary.interrupt_count}회
+- 평균 답변 점수: {summary.avg_answer_score:.1f}/100
 - 회복 점수: {recovery_score:.1f}/100
-
-## 발표 내용 (일부)
-{transcript_text if transcript_text else "발표 내용 없음"}
+- 발화 단어 수: {transcript_word_count}단어
+{script_section}
+## 실제 발화 내용
+{transcript_section}
 
 ## 질의응답 기록
 {chr(10).join(qa_lines) if qa_lines else "질의응답 없음"}
 
-아래 JSON 형식으로만 응답하세요 (코드블록, 설명 없이 JSON만):
+아래 JSON 형식으로만 응답하세요 (코드블록·설명 없이 JSON만):
 {{
-  "strengths": ["강점1", "강점2"],
-  "weaknesses": ["약점1", "약점2"],
-  "improvements": ["개선방법1", "개선방법2"],
-  "curriculum_next": "다음 훈련 추천 한 줄"
+  "strengths": ["강점 설명 (왜 잘했는지 이유 포함)"],
+  "weaknesses": ["약점 설명 (수치 근거 + 왜 문제인지 인과관계 설명)"],
+  "improvements": ["약점별 구체적 개선 행동 (언제, 무엇을, 어떻게 연습할지)"],
+  "curriculum_next": "가장 시급한 약점 한 가지를 위한 다음 훈련 (한 문장)"
 }}
 
-규칙:
-- strengths: 2~3개, 구체적인 수치 언급
-- weaknesses: 2~3개, 구체적인 수치 언급
-- improvements: weaknesses와 같은 수, 실행 가능한 방법으로
-- curriculum_next: 가장 중요한 약점 한 가지를 위한 훈련 추천"""
+작성 규칙:
+- 발화 단어 수가 10 미만이면 weaknesses[0]에 반드시: "발표가 거의 수행되지 않아 WPM·필러·침묵 지표를 신뢰할 수 없습니다. 마이크를 켜고 실제로 말하면서 연습하세요."
+- 준비 대본이 있고 실제 발화와 내용이 크게 다르거나 빠진 핵심 포인트가 있으면 weaknesses에 명시
+- strengths: 2~3개. 단순히 "좋다"가 아니라 "수치 X이기 때문에 Y 효과가 있다" 형식
+- weaknesses: 2~3개. "수치 X → 이것이 Y 문제를 유발한다 → 청중에게 Z 영향을 미친다" 인과관계로 작성
+- improvements: weaknesses 각각에 1:1 대응. "하루 N분씩 X 연습" 같은 즉시 실천 가능한 구체적 행동
+- curriculum_next: "~을 위한 ~훈련" 형식의 한 문장"""
 
         result_box: list = [None]
         error_box: list = [None]

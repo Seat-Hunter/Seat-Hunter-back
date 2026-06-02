@@ -73,6 +73,8 @@ class ReportGenerationInput(BaseModel):
     speech_metrics: List[SpeechMetricsSnapshot] = Field(default_factory=list)
     recovery_metrics: RecoveryMetricsInput
     user_pattern: UserPatternInput = Field(default_factory=UserPatternInput)
+    transcript_text: Optional[str] = None
+    script_text: Optional[str] = None
 
 
 class ReportSummary(BaseModel):

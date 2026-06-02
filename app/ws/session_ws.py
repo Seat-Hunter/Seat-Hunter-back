@@ -421,8 +421,10 @@ async def session_websocket(websocket: WebSocket, session_id: str):
 
             await sr.set_metrics({
                 "current_wpm": analysis.recent_wpm,
+                "average_wpm": analysis.average_wpm,
                 "filler_count_recent": analysis.filler_count,
                 "silence_ms": analysis.silence_duration,
+                "silence_count": analysis.silence_count,
                 "stress_score": analysis.stress_score,
             })
 

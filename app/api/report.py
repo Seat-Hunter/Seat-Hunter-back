@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import JSONResponse
 from app.core.supabase_client import get_supabase
 import json
 
@@ -29,7 +30,7 @@ async def get_report(session_id: str):
     row = res.data[0]
 
     if not row.get("overall_score"):
-        raise HTTPException(status_code=404, detail="리포트 생성 중입니다. 잠시 후 다시 시도하세요.")
+        return JSONResponse(status_code=202, content={"status": "generating"})
 
     scripts_res = sb.table("scripts") \
         .select("transcript, start_ms, end_ms, segment_index, timestamp") \

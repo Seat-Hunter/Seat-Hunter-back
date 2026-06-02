@@ -11,6 +11,7 @@ from app.schemas.report import (
     RecoveryMetricsInput,
     UserPatternInput,
     SpeechMetricsSnapshot,
+    AnswerEvaluationLogItem,
 )
 
 
@@ -58,9 +59,46 @@ class SessionService:
             interrupt_raw = await sr.r.get(f"session:{session_id}:interrupt_log")
             interrupt_list = json.loads(interrupt_raw) if interrupt_raw else []
 
+            answer_raw = await sr.r.get(f"session:{session_id}:answer_log")
+            answer_log = json.loads(answer_raw) if answer_raw else []
+
+            config_raw = await sr.r.get(f"session:{session_id}:config")
+            config = json.loads(config_raw) if config_raw else {}
+            script_text = config.get("script_text") or None
+
+            # Supabase scripts 테이블에서 전체 발화 텍스트와 실제 WPM 계산
+            sb = get_supabase()
+            scripts_res = sb.table("scripts") \
+                .select("transcript, start_ms, end_ms") \
+                .eq("session_id", session_id) \
+                .order("segment_index") \
+                .execute()
+
+            if scripts_res.data:
+                transcript_text = " ".join(s["transcript"] for s in scripts_res.data)
+                total_words = sum(len(s["transcript"].split()) for s in scripts_res.data)
+                first_start = scripts_res.data[0].get("start_ms") or 0
+                last_end = scripts_res.data[-1].get("end_ms") or 0
+                if last_end > first_start + 1000:
+                    duration_min = (last_end - first_start) / 60000
+                    calculated_avg_wpm = round(total_words / duration_min, 1) if duration_min > 0 else 0.0
+                elif config.get("duration_seconds", 0) > 0:
+                    duration_min = config["duration_seconds"] / 60
+                    calculated_avg_wpm = round(total_words / duration_min, 1)
+                else:
+                    calculated_avg_wpm = 0.0
+            else:
+                recent_transcript_list = await sr.get_recent_transcript()
+                transcript_text = " ".join(recent_transcript_list) if recent_transcript_list else ""
+                calculated_avg_wpm = 0.0
+
+            # Redis WPM이 0이면 scripts 기반 계산값 사용
+            redis_avg_wpm = metrics.get("average_wpm", metrics.get("current_wpm", 0))
+            actual_avg_wpm = redis_avg_wpm if redis_avg_wpm > 0 else calculated_avg_wpm
+
             snapshot = SpeechMetricsSnapshot(
-                recent_wpm=metrics.get("current_wpm", 0),
-                average_wpm=metrics.get("average_wpm", metrics.get("current_wpm", 0)),
+                recent_wpm=actual_avg_wpm,
+                average_wpm=actual_avg_wpm,
                 filler_count=metrics.get("filler_count_recent", 0),
                 silence_duration=metrics.get("silence_ms", 0),
                 hesitation_score=0.0,
@@ -68,14 +106,55 @@ class SessionService:
             )
             silence_count = metrics.get("silence_count", 0)
 
+            # 회복 점수: 실제 세션 데이터 기반 산출
+            wpm = actual_avg_wpm
+            if 100 <= wpm <= 160:
+                wpm_recovery = 80.0
+            elif 80 <= wpm < 100 or 160 < wpm <= 190:
+                wpm_recovery = 60.0
+            elif wpm > 0:
+                wpm_recovery = 40.0
+            else:
+                wpm_recovery = 50.0
+            if answer_log:
+                avg_ans = sum(item.get("answer_score", 50) for item in answer_log) / len(answer_log)
+                wpm_recovery = wpm_recovery * 0.5 + avg_ans * 0.5
+
+            filler_total = metrics.get("filler_count_recent", 0)
+            filler_reduction = max(10.0, 100.0 - filler_total * 8)
+
+            silence_ms = metrics.get("silence_ms", 0)
+            if silence_ms == 0:
+                silence_reduction = 90.0
+            elif silence_ms < 2000:
+                silence_reduction = 70.0
+            elif silence_ms < 5000:
+                silence_reduction = 50.0
+            else:
+                silence_reduction = 30.0
+
+            answer_eval_log = [
+                AnswerEvaluationLogItem(
+                    question_text=item.get("question_text", ""),
+                    user_answer=item.get("user_answer", ""),
+                    answer_score=item.get("answer_score", 0),
+                    follow_up_needed=item.get("follow_up_needed", False),
+                    audience_reaction=item.get("audience_reaction", ""),
+                )
+                for item in answer_log
+            ]
+
             report_input = ReportGenerationInput(
                 speech_metrics=[snapshot],
                 recovery_metrics=RecoveryMetricsInput(
-                    wpm_recovery_speed_score=50.0,
-                    filler_reduction_score=50.0,
-                    silence_reduction_score=50.0,
+                    wpm_recovery_speed_score=wpm_recovery,
+                    filler_reduction_score=filler_reduction,
+                    silence_reduction_score=silence_reduction,
                 ),
                 user_pattern=UserPatternInput(),
+                answer_evaluation_log=answer_eval_log,
+                transcript_text=transcript_text,
+                script_text=script_text,
             )
 
             result = await asyncio.to_thread(ReportService().generate_report, report_input)
