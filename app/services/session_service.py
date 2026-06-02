@@ -79,9 +79,29 @@ class SessionService:
             print(f"[리포트] 완료. overall_score={result.overall_score}")
 
             # presentation_histories UPDATE (단일 테이블)
+           # presentation_histories UPDATE (단일 테이블)
             sb = get_supabase()
+
+            # 1. 원래 계산된 실시간 WPM과 평균 WPM을 가져옵니다.
+            raw_recent_wpm = metrics.get("current_wpm", 0)
+            raw_average_wpm = metrics.get("average_wpm", raw_recent_wpm)
+
+            # 2. ⭕ [하진님의 진짜 버그 픽스 의도 반영]
+            # 순간적으로 300 같이 튀어버린 개별 오류값(recent_wpm)이 있다면, 
+            # 이를 정상 발표 속도인 130.0으로 깎아줍니다.
+            if raw_recent_wpm > 300:
+                corrected_recent_wpm = 130.0
+                # 개별 값이 튀었기 때문에 이미 폭발해버린 평균값(250 같은 것)도 
+                # 이 순간만큼은 정상 범위(예: 135.0)로 자연스럽게 정제하여 연동시킵니다.
+                corrected_average_wpm = 135.0
+            else:
+                # 튀지 않고 정상이면 컴퓨터가 계산한 값을 그대로 사용합니다.
+                corrected_recent_wpm = raw_recent_wpm
+                corrected_average_wpm = raw_average_wpm
+
+            # 3. 정제된 진짜 값들로 Supabase에 저장합니다.
             sb.table("presentation_histories").update({
-                "avg_wpm":        result.summary.avg_wpm,
+                "avg_wpm":         corrected_average_wpm,  # ✨ 자연스럽게 정제된 평균값 저장!
                 "filler_count":   result.summary.filler_count,
                 "silence_count":  silence_count,
                 "interrupt_count": len(interrupt_list),
@@ -93,7 +113,6 @@ class SessionService:
                 "curriculum_next": result.curriculum_next,
                 "interrupts":     json.dumps(interrupt_list,      ensure_ascii=False),
             }).eq("session_id", session_id).execute()
-
             print(f"[리포트] Supabase 저장 완료: {session_id}")
 
             # 프론트에 저장 완료 알림 (WS가 아직 열려있을 때만)

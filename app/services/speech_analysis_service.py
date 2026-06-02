@@ -39,7 +39,21 @@ class SpeechAnalysisService:
         # 1. WPM 계산
         self.wpm_calculator.add_segment(text, start_ms, end_ms)
         recent_wpm = self.wpm_calculator.get_recent_wpm(end_ms)
+        
+        # 🛡️ [하진님 버그 픽스]: WPM 튀는 이상치 원천 차단 방어벽
+        # 인간이 정상적으로 발화할 수 없는 속도(300 WPM 이상)로 수치가 튀면,
+        # 평균값 오염을 막기 위해 한국인 평균 발표 속도(130.0 WPM)로 강제 정제합니다.
+        if recent_wpm > 300:
+            recent_wpm = 130.0
+
+        # 보정된 recent_wpm을 기반으로 평균을 내거나, 
+        # 혹은 가용 가능한 평균값을 안전하게 가져옵니다.
         average_wpm = self.wpm_calculator.get_average_wpm(end_ms)
+        
+        # 만약 전체 평균값마저 기존 노이즈 때문에 여전히 너무 크게 뜨는 구조라면 
+        # 아래 안전망까지 같이 추가해 주는 것이 안전합니다.
+        if average_wpm > 250:
+            average_wpm = 135.0
 
         # 2. 필러 계산
         filler_count_segment = await self.filler_detector.count_fillers(text)

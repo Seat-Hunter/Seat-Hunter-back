@@ -24,8 +24,8 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins_list,
-    allow_credentials=True,
+    allow_origins=["*"],  # 👈 기존 settings.cors_origins_list 대신 ["*"]로 변경!
+    allow_credentials=True,  # 만약 "*" 설정 시 에러가 나면 allow_credentials=False로 바꾸거나 방법 2를 쓰세요.
     allow_methods=["*"],
     allow_headers=["*"],
 )
