@@ -351,6 +351,10 @@ class ReportService:
 
         base -= max(len(weaknesses) - 1, 0) * 3
 
+        # 질문 스킵 페널티 (스킵 1회당 10점)
+        skipped = getattr(summary, 'skipped_count', 0)
+        base -= skipped * 10
+
         return max(0.0, min(base, 100.0))
 
     def _update_user_pattern(
