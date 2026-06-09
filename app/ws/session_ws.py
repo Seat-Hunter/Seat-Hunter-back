@@ -32,6 +32,12 @@ session_service = SessionService()
 
 
 def _generate_feedback(analysis) -> str | None:
+    """
+    실시간 사용자 피드백은 그대로 rule 기반으로 둔다.
+
+    여기서의 rule은 인터럽트 판단이 아니라,
+    HUD/프론트에 보여주는 짧은 안내 메시지용이다.
+    """
     if analysis.recent_wpm > 170:
         return "말속도가 너무 빠릅니다. 천천히 말씀해보세요."
     if 0 < analysis.recent_wpm < 60:
@@ -59,6 +65,46 @@ def _is_state(state, target: SessionState) -> bool:
     return _safe_session_state_name(state) == target.value
 
 
+def normalize_transcript(value) -> str:
+    """
+    InterruptService에는 recent_transcript를 문자열로 넘겨야 하므로
+    Redis transcript 값을 항상 str로 변환한다.
+    """
+    if value is None:
+        return ""
+
+    if isinstance(value, list):
+        return " ".join(
+            str(item).strip()
+            for item in value
+            if str(item).strip()
+        )
+
+    return str(value).strip()
+
+
+def normalize_transcript_list(value) -> list[str]:
+    """
+    QuestionGenerationInput / AnswerEvaluationInput의 recent_context는
+    list[str]를 기대하므로 Redis transcript 값을 항상 list[str]로 변환한다.
+    """
+    if value is None:
+        return []
+
+    if isinstance(value, list):
+        return [
+            str(item).strip()
+            for item in value
+            if str(item).strip()
+        ]
+
+    text = str(value).strip()
+    if not text:
+        return []
+
+    return [text]
+
+
 @router.websocket("/ws/sessions/{session_id}")
 async def session_websocket(websocket: WebSocket, session_id: str):
     await ws_manager.connect(session_id, websocket)
@@ -66,7 +112,10 @@ async def session_websocket(websocket: WebSocket, session_id: str):
     sr = SessionRedis(session_id)
     stt = STTAggregator(session_id)
     speech_analyzer = SpeechAnalysisService()
+
+    # LLM 기반 인터럽트 판단 서비스
     interrupt_service = InterruptService()
+
     question_service = QuestionService()
     audience_service = AudienceService()
 
@@ -87,20 +136,24 @@ async def session_websocket(websocket: WebSocket, session_id: str):
     answer_started_at: float | None = None
     last_answer_at: float | None = None
 
-    skipped_count: int = 0  # 질문 스킵 횟수 (페널티용)
+    skipped_count: int = 0
 
-    QUESTION_ACCEPT_TIMEOUT_SEC = 30.0  # 답변하기 버튼 대기 시간
-
+    QUESTION_ACCEPT_TIMEOUT_SEC = 30.0
     MAX_FOLLOW_UPS = 2
 
-    # 마지막 답변 조각 이후 이 시간 동안 추가 답변이 없으면 평가
     ANSWER_SILENCE_SEC = 3.0
-
-    # 질문 후 사용자가 아예 답변하지 않을 때 기다리는 최대 시간
     NO_ANSWER_TIMEOUT_SEC = 12.0
 
     deepgram_started = False
     websocket_closed = False
+
+    # LLM 인터럽트 판단 호출 제한
+    # 질문이 반드시 어느 정도 나와야 하므로 5초/40자보다 조금 완화
+    last_llm_interrupt_check_at: float = 0.0
+    last_llm_checked_transcript_len: int = 0
+
+    LLM_INTERRUPT_CHECK_INTERVAL_SEC = 3.0
+    LLM_INTERRUPT_MIN_TRANSCRIPT_DELTA = 25
 
     # ============================================================
     # 안전 종료 유틸
@@ -216,6 +269,15 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         print("음성 없이 텍스트 질문으로 답변 상태에 진입합니다.")
         print("=================================================\n")
 
+    def log_llm_interrupt_decision(decision):
+        print("\n========== [LLM 인터럽트 판단] ==========")
+        print(f"should_interrupt: {decision.should_interrupt}")
+        print(f"reason: {decision.reason}")
+        print(f"interrupt_type: {decision.interrupt_type}")
+        print(f"triggered_by: {decision.triggered_by}")
+        print(f"confidence: {getattr(decision, 'confidence', None)}")
+        print("========================================\n")
+
     # ============================================================
     # 상태 전환 함수
     # ============================================================
@@ -232,22 +294,34 @@ async def session_websocket(websocket: WebSocket, session_id: str):
             no_answer_timer_task.cancel()
         no_answer_timer_task = None
 
+    async def cancel_accept_timeout():
+        nonlocal accept_timeout_task
+
+        if accept_timeout_task and not accept_timeout_task.done():
+            accept_timeout_task.cancel()
+        accept_timeout_task = None
+
     async def handle_question_accept_timeout(question_id: str):
-        """10초 내 질문 받기 버튼 미클릭 시 스킵 처리"""
-        nonlocal skipped_count, current_question, current_question_id
-        nonlocal parent_question_id, follow_up_count, answer_buffer
+        """
+        질문이 나온 뒤 일정 시간 동안 사용자가 질문 받기/답변하기를 누르지 않으면 스킵 처리
+        """
+        nonlocal skipped_count
+        nonlocal current_question
+        nonlocal current_question_id
+        nonlocal parent_question_id
+        nonlocal follow_up_count
+        nonlocal answer_buffer
 
         try:
             await asyncio.sleep(QUESTION_ACCEPT_TIMEOUT_SEC)
         except asyncio.CancelledError:
-            return  # accept_question 수신 시 취소됨
+            return
 
-        # 아직 같은 질문이면 스킵 처리
         if current_question_id != question_id:
             return
 
         skipped_count += 1
-        print(f"\n[질문 스킵] {question_id} — 10초 초과, 스킵 횟수: {skipped_count}")
+        print(f"\n[질문 스킵] {question_id} — {QUESTION_ACCEPT_TIMEOUT_SEC}초 초과, 스킵 횟수: {skipped_count}")
 
         await safe_broadcast({
             "type": "question_skipped",
@@ -255,16 +329,20 @@ async def session_websocket(websocket: WebSocket, session_id: str):
             "skipped_count": skipped_count,
         })
 
-        # Redis에 스킵 기록
         try:
             _log_raw = await sr.r.get(f"session:{session_id}:skipped_log")
             _log = json.loads(_log_raw) if _log_raw else []
-            _log.append({"question_id": question_id, "created_at": time.time()})
-            await sr.r.set(f"session:{session_id}:skipped_log", json.dumps(_log))
+            _log.append({
+                "question_id": question_id,
+                "created_at": time.time(),
+            })
+            await sr.r.set(
+                f"session:{session_id}:skipped_log",
+                json.dumps(_log, ensure_ascii=False),
+            )
         except Exception as e:
             print(f"[스킵 로그 저장 에러] {e}")
 
-        # 발표 복귀
         current_question = None
         current_question_id = None
         parent_question_id = None
@@ -272,6 +350,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         answer_buffer.clear()
 
         await safe_set_tts_playing(False)
+
         try:
             await sr.set_state(SessionState.RUNNING)
             await safe_broadcast(make_session_state(SessionState.RUNNING))
@@ -279,9 +358,14 @@ async def session_websocket(websocket: WebSocket, session_id: str):
             print(f"[스킵 후 복귀 에러] {e}")
 
     async def resume_presentation():
-        nonlocal current_question, current_question_id
-        nonlocal parent_question_id, follow_up_count
-        nonlocal answer_buffer, answer_started, answer_started_at, last_answer_at
+        nonlocal current_question
+        nonlocal current_question_id
+        nonlocal parent_question_id
+        nonlocal follow_up_count
+        nonlocal answer_buffer
+        nonlocal answer_started
+        nonlocal answer_started_at
+        nonlocal last_answer_at
 
         current_question = None
         current_question_id = None
@@ -294,6 +378,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         last_answer_at = None
 
         await cancel_answer_timers()
+        await cancel_accept_timeout()
 
         await safe_set_tts_playing(False)
         await safe_broadcast({"type": "question_resolved"})
@@ -348,8 +433,9 @@ async def session_websocket(websocket: WebSocket, session_id: str):
 
     async def enter_answering_state():
         """
-        답변 상태로만 진입한다.
-        여기서 답변 평가 타이머를 시작하면 안 된다.
+        답변 상태로 진입한다.
+
+        여기서 바로 평가 타이머를 시작하지 않는다.
         실제 답변 final transcript가 들어온 뒤 start_answer_timer()를 시작한다.
         """
         nonlocal answer_started
@@ -447,15 +533,31 @@ async def session_websocket(websocket: WebSocket, session_id: str):
     # ============================================================
 
     async def on_final_transcript(text: str, start_ms: int, end_ms: int):
+        """
+        발표 중 final transcript가 들어올 때마다 실행된다.
+
+        수정 핵심:
+        1. InterruptService에는 recent_transcript를 str로 전달
+        2. QuestionService에는 recent_context를 list[str]로 전달
+        3. 질문 생성 성공 후에만 cooldown 시작
+        4. 답변 평가에도 recent_context를 list[str]로 전달
+        """
         nonlocal current_question
         nonlocal current_question_id
         nonlocal parent_question_id
         nonlocal follow_up_count
         nonlocal answer_buffer
+        nonlocal accept_timeout_task
+        nonlocal last_llm_interrupt_check_at
+        nonlocal last_llm_checked_transcript_len
+
+        clean_text = text.strip()
+        if not clean_text:
+            return
 
         try:
             analysis = await speech_analyzer.analyze(SpeechAnalysisInput(
-                text=text,
+                text=clean_text,
                 start_ms=start_ms,
                 end_ms=end_ms,
                 is_speaking=True,
@@ -492,13 +594,41 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                 return
 
             current_state = await sr.get_state()
+
             if _is_state(current_state, SessionState.ANSWERING):
                 return
+
             if _is_state(current_state, SessionState.INTERRUPTED):
                 return
-            # 현재 질문이 진행 중이면 새 인터럽트 차단
+
             if current_question_id:
                 return
+
+            # 발표 transcript 저장은 여기서만 한다.
+            await sr.push_transcript(clean_text)
+
+            recent_transcript_raw = await sr.get_recent_transcript()
+
+            # InterruptService용: 문자열
+            recent_transcript = normalize_transcript(recent_transcript_raw)
+
+            # QuestionService용: list[str]
+            recent_context_list = normalize_transcript_list(recent_transcript_raw)
+
+            now_for_llm_check = time.time()
+
+            if now_for_llm_check - last_llm_interrupt_check_at < LLM_INTERRUPT_CHECK_INTERVAL_SEC:
+                print("[LLM 인터럽트 판단 생략] 호출 간격 제한")
+                return
+
+            transcript_delta = len(recent_transcript) - last_llm_checked_transcript_len
+
+            if transcript_delta < LLM_INTERRUPT_MIN_TRANSCRIPT_DELTA:
+                print("[LLM 인터럽트 판단 생략] 최근 transcript 변화량 부족")
+                return
+
+            last_llm_interrupt_check_at = now_for_llm_check
+            last_llm_checked_transcript_len = len(recent_transcript)
 
             last_interrupt = await sr.get_last_interrupt_at()
             cooldown_remaining = 0
@@ -517,40 +647,50 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                     stress_score=analysis.stress_score,
                 ),
                 context_state=ContextStateInput(
+                    current_topic=None,
                     drift_score=0.0,
                     topic_shift_detected=False,
+                    latest_utterance=clean_text,
+                    recent_transcript=recent_transcript,
+                    slide_context=None,
+                    script_context=None,
                 ),
                 interrupt_enabled=True,
                 cooldown_remaining_ms=int(cooldown_remaining),
                 pressure_level="medium",
+                presentation_type="academic",
+                audience_type="professor",
+                previous_questions=previous_questions,
             )
 
-            decision = interrupt_service.decide(interrupt_input)
-            if not decision.should_interrupt:
-                return
+            decision = await interrupt_service.decide(interrupt_input)
+            log_llm_interrupt_decision(decision)
 
             if not decision.should_interrupt:
                 return
 
-            await sr.set_last_interrupt_at(time.time())
-            recent_transcript = await sr.get_recent_transcript()
-
-            question_result = await question_service.generate_question_ai(
-                QuestionGenerationInput(
-                    current_topic=None,
-                    recent_context=recent_transcript,
-                    audience_type="professor",
-                    presentation_type="academic",
-                    pressure_level="medium",
-                    previous_questions=previous_questions,
+            try:
+                question_result = await question_service.generate_question_ai(
+                    QuestionGenerationInput(
+                        current_topic=None,
+                        recent_context=recent_context_list,
+                        audience_type="professor",
+                        presentation_type="academic",
+                        pressure_level="medium",
+                        previous_questions=previous_questions,
+                    )
                 )
-            )
+            except Exception as e:
+                print(f"[질문 생성 에러] {e}")
+                return
+
+            # 질문 생성이 성공한 뒤에만 cooldown 시작
+            await sr.set_last_interrupt_at(time.time())
 
             previous_questions.append(question_result.question_text)
 
             current_question = question_result.question_text
             follow_up_count = 0
-
             answer_buffer.clear()
 
             q_id = f"q_{len(previous_questions)}"
@@ -568,6 +708,9 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                     "parent_question_id": parent_question_id,
                     "question_text": question_result.question_text,
                     "reason": decision.reason,
+                    "interrupt_type": decision.interrupt_type,
+                    "triggered_by": decision.triggered_by,
+                    "confidence": getattr(decision, "confidence", None),
                     "is_follow_up": False,
                     "follow_up_count": 0,
                     "max_follow_ups": MAX_FOLLOW_UPS,
@@ -576,7 +719,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
 
                 await sr.r.set(
                     f"session:{session_id}:interrupt_log",
-                    json.dumps(_log, ensure_ascii=False)
+                    json.dumps(_log, ensure_ascii=False),
                 )
             except Exception as e:
                 print(f"[질문 로그 저장 에러] {e}")
@@ -590,10 +733,13 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                 "is_follow_up": False,
                 "follow_up_count": follow_up_count,
                 "max_follow_ups": MAX_FOLLOW_UPS,
+                "interrupt_reason": decision.reason,
+                "interrupt_type": decision.interrupt_type,
+                "triggered_by": decision.triggered_by,
+                "confidence": getattr(decision, "confidence", None),
             })
 
-            # TTS는 프론트에서 accept_question 메시지 받은 후 전송
-            # 10초 내 안 누르면 스킵 처리
+            await cancel_accept_timeout()
             accept_timeout_task = asyncio.create_task(handle_question_accept_timeout(q_id))
 
         except Exception as e:
@@ -618,11 +764,10 @@ async def session_websocket(websocket: WebSocket, session_id: str):
             print(f"[답변 조각 무시] 현재 질문 없음: {clean_text}")
             return
 
-        # 질문 텍스트가 답변에 포함된 경우 필터링
         if current_question and clean_text in current_question:
             print(f"[답변 필터] 질문 텍스트 포함 감지 → 무시: {clean_text[:30]}")
             return
-    
+
         now = time.time()
 
         if not answer_started:
@@ -668,6 +813,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         nonlocal answer_started
         nonlocal answer_started_at
         nonlocal last_answer_at
+        nonlocal accept_timeout_task
 
         try:
             await asyncio.sleep(ANSWER_SILENCE_SEC)
@@ -706,12 +852,19 @@ async def session_websocket(websocket: WebSocket, session_id: str):
             return
 
         try:
+            recent_transcript_raw = await sr.get_recent_transcript()
+            recent_context_list = normalize_transcript_list(recent_transcript_raw)
+
             eval_result = await question_service.evaluate_answer_ai(
                 AnswerEvaluationInput(
+                    question_id=current_question_id,
+                    parent_question_id=parent_question_id,
                     question_text=current_question,
                     user_answer=user_answer,
-                    recent_context=await sr.get_recent_transcript(),
+                    current_topic=None,
+                    recent_context=recent_context_list,
                     pressure_level="medium",
+                    is_follow_up=follow_up_count > 0,
                     follow_up_count=follow_up_count,
                     max_follow_ups=MAX_FOLLOW_UPS,
                 )
@@ -751,7 +904,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
 
             await sr.r.set(
                 f"session:{session_id}:answer_log",
-                json.dumps(_answer_log, ensure_ascii=False)
+                json.dumps(_answer_log, ensure_ascii=False),
             )
 
         except Exception as e:
@@ -828,7 +981,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
 
             await sr.r.set(
                 f"session:{session_id}:interrupt_log",
-                json.dumps(_log, ensure_ascii=False)
+                json.dumps(_log, ensure_ascii=False),
             )
 
         except Exception as e:
@@ -845,14 +998,24 @@ async def session_websocket(websocket: WebSocket, session_id: str):
             "pressure_level": "medium",
         })
 
-        # 꼬리질문도 동일하게 accept_question 대기
-        accept_timeout_task = asyncio.create_task(handle_question_accept_timeout(current_question_id))
+        await cancel_accept_timeout()
+        accept_timeout_task = asyncio.create_task(
+            handle_question_accept_timeout(current_question_id)
+        )
 
     async def evaluate_and_maybe_follow_up_immediate():
-        """답변 완료 버튼 클릭 시 — 타이머/침묵 대기 없이 즉시 평가"""
-        nonlocal current_question, current_question_id, parent_question_id
-        nonlocal answer_buffer, follow_up_count, answer_started
-        nonlocal answer_started_at, last_answer_at
+        """
+        답변 완료 버튼 클릭 시 타이머/침묵 대기 없이 즉시 평가
+        """
+        nonlocal current_question
+        nonlocal current_question_id
+        nonlocal parent_question_id
+        nonlocal answer_buffer
+        nonlocal follow_up_count
+        nonlocal answer_started
+        nonlocal answer_started_at
+        nonlocal last_answer_at
+        nonlocal accept_timeout_task
 
         user_answer = " ".join(answer_buffer).strip()
 
@@ -868,12 +1031,19 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         log_answer_received(current_question_id, current_question, user_answer)
 
         try:
+            recent_transcript_raw = await sr.get_recent_transcript()
+            recent_context_list = normalize_transcript_list(recent_transcript_raw)
+
             eval_result = await question_service.evaluate_answer_ai(
                 AnswerEvaluationInput(
+                    question_id=current_question_id,
+                    parent_question_id=parent_question_id,
                     question_text=current_question,
                     user_answer=user_answer,
-                    recent_context=await sr.get_recent_transcript(),
+                    current_topic=None,
+                    recent_context=recent_context_list,
                     pressure_level="medium",
+                    is_follow_up=follow_up_count > 0,
                     follow_up_count=follow_up_count,
                     max_follow_ups=MAX_FOLLOW_UPS,
                 )
@@ -883,9 +1053,13 @@ async def session_websocket(websocket: WebSocket, session_id: str):
             await resume_presentation()
             return
 
-        log_answer_evaluation(current_question_id, current_question, user_answer, eval_result)
+        log_answer_evaluation(
+            current_question_id,
+            current_question,
+            user_answer,
+            eval_result,
+        )
 
-        # Supabase question_answers 테이블에 저장
         try:
             sb = get_supabase()
             sb.table("question_answers").insert({
@@ -904,6 +1078,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         await safe_broadcast({
             "type": "answer_evaluated",
             "question_id": current_question_id,
+            "parent_question_id": parent_question_id,
             "question_text": current_question,
             "user_answer": user_answer,
             "answer_score": eval_result.answer_score,
@@ -919,12 +1094,19 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         await safe_broadcast({
             "type": "audience_reaction",
             "reaction": eval_result.audience_reaction,
+            "answer_score": eval_result.answer_score,
+            "evaluation_reason": eval_result.evaluation_reason,
+            "follow_up_needed": eval_result.follow_up_needed,
+            "follow_up_count": follow_up_count,
+            "max_follow_ups": MAX_FOLLOW_UPS,
         })
 
         answer_buffer.clear()
         answer_started = False
         answer_started_at = None
         last_answer_at = None
+
+        await cancel_answer_timers()
 
         if follow_up_count >= MAX_FOLLOW_UPS:
             log_follow_up_finished("최대 꼬리질문 횟수 도달")
@@ -939,7 +1121,11 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         follow_up_count += 1
         current_question = eval_result.follow_up_question
         current_question_id = f"{parent_question_id}_follow_up_{follow_up_count}"
+
         answer_buffer.clear()
+        answer_started = False
+        answer_started_at = None
+        last_answer_at = None
 
         log_follow_up(current_question_id, current_question)
 
@@ -951,9 +1137,13 @@ async def session_websocket(websocket: WebSocket, session_id: str):
             "is_follow_up": True,
             "follow_up_count": follow_up_count,
             "max_follow_ups": MAX_FOLLOW_UPS,
+            "pressure_level": "medium",
         })
 
-        accept_timeout_task = asyncio.create_task(handle_question_accept_timeout(current_question_id))
+        await cancel_accept_timeout()
+        accept_timeout_task = asyncio.create_task(
+            handle_question_accept_timeout(current_question_id)
+        )
 
     stt.set_on_final_transcript(on_final_transcript)
 
@@ -1010,7 +1200,6 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                     if is_answer or _is_state(current_state, SessionState.ANSWERING):
                         await append_answer_segment(text)
                     else:
-                        await sr.push_transcript(text)
                         await on_final_transcript(text, ts, ts)
 
                 else:
@@ -1024,14 +1213,10 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                     await sr.set_user_speaking(msg["is_speaking"])
 
             elif msg_type == "accept_question":
-                # 프론트에서 "질문 받기" 버튼 클릭 시
                 q_id = msg.get("question_id", current_question_id)
                 print(f"[질문 수락] question_id={q_id}")
 
-                # 타임아웃 완전 취소 (TTS 재생 시간 동안은 타임아웃 없음)
-                if accept_timeout_task and not accept_timeout_task.done():
-                    accept_timeout_task.cancel()
-                accept_timeout_task = None
+                await cancel_accept_timeout()
 
                 if current_question and current_question_id:
                     await send_question_tts_or_fallback(
@@ -1051,28 +1236,30 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                     or _is_state(current_state, SessionState.ANSWERING)
                 ):
                     print(f"[TTS 종료] 답변하기 버튼 대기: question_id={current_question_id}")
+
                     await safe_broadcast({
                         "type": "waiting_for_answer",
                         "question_id": current_question_id,
                         "question_text": current_question,
                     })
-                    # TTS 끝난 후 30초 내 답변 안 하면 스킵
+
                     if current_question_id:
-                        accept_timeout_task = asyncio.create_task(handle_question_accept_timeout(current_question_id))
+                        await cancel_accept_timeout()
+                        accept_timeout_task = asyncio.create_task(
+                            handle_question_accept_timeout(current_question_id)
+                        )
 
             elif msg_type == "answer_started":
-                # 프론트에서 "답변하기" 버튼 클릭 시
                 print(f"[답변 시작 신호] question_id={current_question_id}")
-                # 답변 시작했으니 타임아웃 취소
-                if accept_timeout_task and not accept_timeout_task.done():
-                    accept_timeout_task.cancel()
-                accept_timeout_task = None
+
+                await cancel_accept_timeout()
                 await enter_answering_state()
 
             elif msg_type == "answer_finished":
-                # 프론트에서 "답변 완료" 버튼 클릭 시 — 타이머 없이 즉시 평가
                 print(f"[답변 완료 신호] question_id={current_question_id}")
+
                 current_state = await sr.get_state()
+
                 if _is_state(current_state, SessionState.ANSWERING):
                     await cancel_answer_timers()
                     asyncio.create_task(evaluate_and_maybe_follow_up_immediate())
@@ -1084,7 +1271,6 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                 if manual_question_text:
                     current_question = manual_question_text
                     follow_up_count = 0
-
                     answer_buffer.clear()
 
                     q_id = f"manual_{int(time.time() * 1000)}"
@@ -1116,6 +1302,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                 print(f"[WS] 세션 종료 요청 수신: {session_id}")
 
                 await cancel_answer_timers()
+                await cancel_accept_timeout()
                 await safe_close_stt("finish_session 수신")
                 await safe_set_tts_playing(False)
 
@@ -1135,6 +1322,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                 print(f"[WS] 세션 취소 요청 수신: {session_id}")
 
                 await cancel_answer_timers()
+                await cancel_accept_timeout()
                 await safe_close_stt("cancel_session 수신")
                 await safe_set_tts_playing(False)
 
@@ -1170,7 +1358,9 @@ async def session_websocket(websocket: WebSocket, session_id: str):
 
         if current_state_name not in [finished_name, cancelled_name, None]:
             print(f"[WS 끊김] 세션 {session_id} 자동 종료")
+
             await cancel_answer_timers()
+            await cancel_accept_timeout()
             await safe_close_stt("WebSocketDisconnect")
             await safe_set_tts_playing(False)
 
@@ -1181,13 +1371,17 @@ async def session_websocket(websocket: WebSocket, session_id: str):
 
     except Exception as e:
         print(f"[WS 에러] {e}")
+
         await cancel_answer_timers()
+        await cancel_accept_timeout()
         await safe_close_stt("WS 에러 발생")
+        await safe_set_tts_playing(False)
 
     finally:
         websocket_closed = True
 
         await cancel_answer_timers()
+        await cancel_accept_timeout()
 
         try:
             await safe_set_tts_playing(False)

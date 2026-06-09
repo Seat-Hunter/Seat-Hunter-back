@@ -1,3 +1,5 @@
+# app/core/config.py
+
 from typing import List
 from pydantic_settings import BaseSettings
 
@@ -17,7 +19,13 @@ class Settings(BaseSettings):
 
     # OpenAI
     openai_api_key: str = ""
+
+    # 질문 생성 / 답변 평가용 모델
     openai_question_model: str = "gpt-5-mini"
+
+    # 인터럽트 판단 전용 모델
+    # 발표 내용을 보고 "지금 끼어들지 말지" 판단하는 모델
+    openai_interrupt_model: str = "gpt-5-mini"
 
     # Auth
     secret_key: str = ""
