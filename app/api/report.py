@@ -1,8 +1,15 @@
-from fastapi import APIRouter, HTTPException
-from app.core.supabase_client import get_supabase
+import asyncio
 import json
 
+from fastapi import APIRouter, HTTPException
+from app.core.supabase_client import get_supabase
+
 router = APIRouter()
+
+# end_session()의 리포트 생성(Gemini 호출 포함)이 끝나기 전에 조회 요청이 오면
+# 바로 404를 내지 않고 최대 20초까지 기다렸다가 다시 확인한다.
+REPORT_POLL_INTERVAL_SEC = 2
+REPORT_POLL_TIMEOUT_SEC = 20
 
 
 def _parse_json_field(val):
@@ -22,16 +29,25 @@ def _parse_json_field(val):
 )
 async def get_report(session_id: str):
     sb = get_supabase()
-    res = sb.table("presentation_histories").select("*").eq("session_id", session_id).execute()
-    if not res.data:
-        raise HTTPException(status_code=404, detail="리포트 없음. 세션이 종료되지 않았거나 생성 전입니다.")
 
-    row = res.data[0]
+    elapsed = 0.0
+    while True:
+        res = sb.table("presentation_histories").select("*").eq("session_id", session_id).execute()
+        if not res.data:
+            raise HTTPException(status_code=404, detail="리포트 없음. 세션이 종료되지 않았거나 생성 전입니다.")
 
-    # overall_score가 NULL(0) 이면 end_session()이 아직 완료되지 않은 것.
-    # Supabase 테이블 DEFAULT가 0인 경우 NULL 대신 0이 오므로 둘 다 처리.
-    if not row.get("overall_score"):
-        raise HTTPException(status_code=404, detail="리포트 생성 중입니다. 잠시 후 다시 시도하세요.")
+        row = res.data[0]
+
+        # overall_score가 NULL(0) 이면 end_session()이 아직 완료되지 않은 것.
+        # Supabase 테이블 DEFAULT가 0인 경우 NULL 대신 0이 오므로 둘 다 처리.
+        if row.get("overall_score"):
+            break
+
+        if elapsed >= REPORT_POLL_TIMEOUT_SEC:
+            raise HTTPException(status_code=404, detail="리포트 생성 중입니다. 잠시 후 다시 시도하세요.")
+
+        await asyncio.sleep(REPORT_POLL_INTERVAL_SEC)
+        elapsed += REPORT_POLL_INTERVAL_SEC
 
     # scripts 조회
     scripts_res = sb.table("scripts") \

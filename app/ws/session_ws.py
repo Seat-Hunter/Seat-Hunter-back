@@ -46,8 +46,6 @@ def _generate_feedback(analysis) -> str | None:
         return "필러 단어가 늘고 있습니다. 잠깐 멈추고 정리 후 말씀해보세요."
     if analysis.stress_score > 0.85:
         return "긴장이 감지됩니다. 천천히 호흡하고 말씀해보세요."
-    if analysis.current_silence_ms > 4000:
-        return "침묵이 길어지고 있습니다. 다음 내용을 이어가보세요."
     return None
 
 
@@ -131,6 +129,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
     answer_timer_task: asyncio.Task | None = None
     no_answer_timer_task: asyncio.Task | None = None
     accept_timeout_task: asyncio.Task | None = None
+    silence_feedback_task: asyncio.Task | None = None
 
     answer_started: bool = False
     answer_started_at: float | None = None
@@ -143,6 +142,9 @@ async def session_websocket(websocket: WebSocket, session_id: str):
 
     ANSWER_SILENCE_SEC = 3.0
     NO_ANSWER_TIMEOUT_SEC = 12.0
+
+    # 발표 중 실시간 침묵 피드백: 마지막 발화 이후 이 시간(초) 동안 다음 발화가 없으면 안내한다.
+    SILENCE_FEEDBACK_SEC = 5.0
 
     deepgram_started = False
     websocket_closed = False
@@ -301,6 +303,48 @@ async def session_websocket(websocket: WebSocket, session_id: str):
             accept_timeout_task.cancel()
         accept_timeout_task = None
 
+    async def cancel_silence_feedback_timer():
+        nonlocal silence_feedback_task
+
+        if silence_feedback_task and not silence_feedback_task.done():
+            silence_feedback_task.cancel()
+        silence_feedback_task = None
+
+    async def start_silence_feedback_timer():
+        nonlocal silence_feedback_task
+
+        await cancel_silence_feedback_timer()
+        silence_feedback_task = asyncio.create_task(handle_silence_feedback_timeout())
+
+    async def handle_silence_feedback_timeout():
+        """
+        발표 중 마지막 발화로부터 SILENCE_FEEDBACK_SEC 동안 새 발화가 없으면
+        실시간으로 침묵 안내를 보낸다. (질문 응답 중에는 보내지 않음)
+        """
+        try:
+            await asyncio.sleep(SILENCE_FEEDBACK_SEC)
+        except asyncio.CancelledError:
+            return
+
+        if await sr.get_tts_playing():
+            return
+
+        current_state = await sr.get_state()
+
+        if _is_state(current_state, SessionState.ANSWERING):
+            return
+
+        if _is_state(current_state, SessionState.INTERRUPTED):
+            return
+
+        if current_question_id:
+            return
+
+        await safe_broadcast({
+            "type": "live_feedback",
+            "message": "침묵이 길어지고 있습니다. 다음 내용을 이어가보세요.",
+        })
+
     async def handle_question_accept_timeout(question_id: str):
         """
         질문이 나온 뒤 일정 시간 동안 사용자가 질문 받기/답변하기를 누르지 않으면 스킵 처리
@@ -354,6 +398,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         try:
             await sr.set_state(SessionState.RUNNING)
             await safe_broadcast(make_session_state(SessionState.RUNNING))
+            await start_silence_feedback_timer()
         except Exception as e:
             print(f"[스킵 후 복귀 에러] {e}")
 
@@ -386,6 +431,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         try:
             await sr.set_state(SessionState.RUNNING)
             await safe_broadcast(make_session_state(SessionState.RUNNING))
+            await start_silence_feedback_timer()
         except Exception as e:
             print(f"[상태 복귀 에러] {e}")
 
@@ -554,6 +600,9 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         clean_text = text.strip()
         if not clean_text:
             return
+
+        # 발화가 들어왔으므로 침묵 피드백 타이머를 다시 시작한다.
+        await start_silence_feedback_timer()
 
         try:
             analysis = await speech_analyzer.analyze(SpeechAnalysisInput(
@@ -1303,6 +1352,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
 
                 await cancel_answer_timers()
                 await cancel_accept_timeout()
+                await cancel_silence_feedback_timer()
                 await safe_close_stt("finish_session 수신")
                 await safe_set_tts_playing(False)
 
@@ -1323,6 +1373,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
 
                 await cancel_answer_timers()
                 await cancel_accept_timeout()
+                await cancel_silence_feedback_timer()
                 await safe_close_stt("cancel_session 수신")
                 await safe_set_tts_playing(False)
 
@@ -1361,6 +1412,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
 
             await cancel_answer_timers()
             await cancel_accept_timeout()
+            await cancel_silence_feedback_timer()
             await safe_close_stt("WebSocketDisconnect")
             await safe_set_tts_playing(False)
 
@@ -1374,6 +1426,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
 
         await cancel_answer_timers()
         await cancel_accept_timeout()
+        await cancel_silence_feedback_timer()
         await safe_close_stt("WS 에러 발생")
         await safe_set_tts_playing(False)
 
@@ -1382,6 +1435,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
 
         await cancel_answer_timers()
         await cancel_accept_timeout()
+        await cancel_silence_feedback_timer()
 
         try:
             await safe_set_tts_playing(False)
