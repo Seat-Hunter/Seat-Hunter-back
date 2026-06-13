@@ -34,14 +34,13 @@ class InterruptService:
         self.model = getattr(settings, "openai_interrupt_model", "gpt-5-nano")
 
         # LLM이 질문 타이밍이라고 해도 신뢰도가 너무 낮으면 차단
-        self.min_confidence = 0.6
+        self.min_confidence = 0.55
 
     async def decide(self, data: InterruptDecisionInput) -> InterruptDecisionResult:
         """
         LLM 기반 인터럽트 판단
 
-        주의:
-        - 여기서의 rule은 시스템 안전장치용이다.
+        - 여기서의 rule은 LLM 판단으로 넘어가기 전에 한 번 더 안전적으로 판단하는 역할을 한다.
         - 실제 질문 타이밍은 LLM이 발화 흐름을 보고 판단한다.
         """
 
@@ -122,7 +121,7 @@ class InterruptService:
             if confidence < self.min_confidence:
                 return InterruptDecisionResult(
                     should_interrupt=False,
-                    reason=f"질문 타이밍일 가능성은 있지만 확신도가 낮아 개입하지 않습니다. 원래 이유: {reason}",
+                    reason=f"질문 타이밍일 가능성은 있지만 확신도가 낮아 개입하지 않습니다. 이유: {reason}",
                     interrupt_type=None,
                     triggered_by=["low_confidence"],
                     confidence=confidence,
@@ -154,44 +153,42 @@ class InterruptService:
 
     def _system_prompt(self) -> str:
         return """
-너는 발표 연습 서비스의 청중 역할을 하는 인터럽트 판단기다.
+너는 발표 연습 서비스에서 청중 역할을 하는 인터럽트 판단기다.
 
-너의 목표는 발표자를 공격적으로 평가하는 것이 아니라,
-발표를 듣다가 자연스럽게 궁금한 지점이 생겼을 때
-적절한 타이밍에 질문할지 판단하는 것이다.
+역할:
+발표자를 공격적으로 평가하는 것이 아니라,
+발표를 듣는 청중 입장에서 자연스럽게 질문할 만한 순간인지 판단한다.
 
-판단 기준:
-- 발표 흐름이 자연스럽게 이어지고 있으면 질문하지 않는다.
-- 발표자가 아직 설명을 이어가는 중이면 조금 더 기다린다.
-- 방금 나온 내용에서 청중이 자연스럽게 궁금해할 만한 지점이 생기면 질문할 수 있다.
-- 핵심 용어가 나왔는데 설명이 부족하면 질문할 수 있다.
-- 방법, 이유, 근거, 예시, 차이점이 궁금해지는 순간이면 질문할 수 있다.
-- 발표자가 너무 막히거나 말을 정리하지 못하는 것 같으면 부드럽게 도와주는 질문을 할 수 있다.
-- 이미 비슷한 질문이 나왔다면 반복하지 않는다.
-- 질문은 너무 자주 하면 안 된다.
-- 단순히 WPM이 높거나 필러가 있다는 이유만으로 질문하지 않는다.
-- 음성 지표는 보조 신호일 뿐이고, 가장 중요한 것은 발표 내용과 흐름이다.
+판단 방향:
+- 발표 흐름을 우선 존중하되, 청중의 이해를 돕는 질문이라면 개입할 수 있다.
+- 발표자가 아직 설명을 이어가는 중이라면 대체로 기다린다.
+- 핵심 개념, 방법, 이유, 근거, 예시, 차이점, 연결 관계 등을 종합적으로 고려해 설명이 부족하다고 판단되면 질문할 수 있다.
+- 이미 나온 질문과 비슷한 내용은 반복하지 않는다.
+- WPM, 필러, 침묵 같은 음성 지표는 참고만 하고, 최종 판단은 발표 내용과 흐름을 기준으로 한다.
 
-질문하면 좋은 자연스러운 순간의 예:
-- “방금 말한 개념이 중요한 것 같은데 조금 더 설명이 필요해 보임”
-- “방법을 말했지만 왜 그 방법을 선택했는지는 아직 안 나옴”
-- “결과나 주장에 대한 근거가 궁금해짐”
-- “앞 내용과 방금 내용의 연결이 약간 궁금해짐”
-- “청중 입장에서 예시를 들으면 이해가 더 쉬울 것 같음”
+질문을 고려하기 좋은 경우:
+- 방금 나온 내용이 중요하지만 설명이 부족한 경우
+- 주장이나 결과에 대한 이유나 근거가 궁금한 경우
+- 예시가 있으면 청중이 더 쉽게 이해할 수 있는 경우
+- 앞 내용과 방금 내용의 연결이 약한 경우
+- 발표자가 잠시 막혀서 자연스럽게 흐름을 이어줄 필요가 있는 경우
 
-질문하지 말아야 하는 순간:
-- 인사말이나 발표 초반 자기소개만 나온 상황
-- 발표자가 문장을 이어가는 중인 상황
-- 아직 맥락이 충분히 쌓이지 않은 상황
-- 단지 말이 빠르거나 느린 상황
-- 방금 질문한 내용과 비슷한 질문이 될 가능성이 큰 상황
+질문을 피하는 것이 좋은 경우:
+- 인사말, 자기소개, 발표 초반처럼 맥락이 아직 부족한 경우
+- 발표자가 한 문장이나 설명을 이어가는 중인 경우
+- 단순히 말이 빠르거나 필러가 있다는 것만 문제인 경우
+- 최근 질문과 거의 같은 질문이 될 가능성이 큰 경우
 
-출력은 반드시 JSON object만 반환한다.
+출력 규칙:
+- 반드시 JSON object만 반환한다.
+- 모든 필드는 항상 포함한다.
+- reason은 한국어 한 문장으로 짧게 작성한다.
+- 빈 JSON object({})를 반환하지 않는다.
 
 형식:
 {
   "should_interrupt": true 또는 false,
-  "reason": "왜 지금 질문하거나 질문하지 않는지 한국어로 짧게 설명",
+  "reason": "지금 질문하거나 질문하지 않는 이유 20자 이내로 간단히",
   "interrupt_type": "natural_question | concept_question | reason_question | evidence_question | example_question | connection_question | recovery_question | null",
   "triggered_by": ["curiosity", "concept_needs_detail", "reason_unclear", "evidence_needed", "example_needed", "connection_unclear", "hesitation"],
   "confidence": 0.0부터 1.0 사이 숫자
@@ -203,13 +200,13 @@ class InterruptService:
         context = data.context_state
 
         previous_questions_text = "\n".join(
-            [f"- {q}" for q in data.previous_questions[-5:]]
+            [f"- {q}" for q in data.previous_questions[-3:]]
         ) or "없음"
 
         return f"""
 [상황]
 발표자가 실시간으로 발표 중이다.
-너는 청중처럼 발표를 듣고 있다가, 자연스럽게 궁금한 타이밍이면 질문을 하려고 한다.
+너는 청중처럼 발표를 듣고 있다가, 궁금한 내용을 자연스러운 타이밍에 질문을 하려고 한다.
 
 [발표 유형]
 {data.presentation_type}
@@ -247,14 +244,15 @@ class InterruptService:
 - stress_score: {speech.stress_score}
 
 [판단]
-지금이 청중 입장에서 자연스럽게 질문해도 되는 타이밍인지 판단해라.
+위 정보를 바탕으로 지금 청중 질문이 자연스러운 타이밍인지 판단해라.
 
-중요:
-- 발표자가 아직 설명을 이어가는 중이면 should_interrupt=false
-- 단순히 발표가 완벽하지 않다는 이유로 질문하지 마라
-- 진짜로 청중이 궁금해할 만한 지점이 생겼을 때만 should_interrupt=true
-- 질문할 경우, 왜 궁금해졌는지를 reason에 적어라
-- JSON object만 반환해라
+판단할 때 고려할 것:
+- 발표 흐름을 끊는 질문인지, 이해를 돕는 질문인지
+- 방금 나온 내용에서 청중이 궁금해할 만한 구체적인 지점이 있는지
+- 아직 조금 더 설명을 기다리는 편이 자연스러운지
+- 최근 질문과 중복되지 않는지
+
+JSON object만 반환해라.
 """
 
     def _normalize_triggered_by(self, value: Any) -> list[str]:
