@@ -127,7 +127,6 @@ async def session_websocket(websocket: WebSocket, session_id: str):
     follow_up_count: int = 0
 
     answer_timer_task: asyncio.Task | None = None
-    no_answer_timer_task: asyncio.Task | None = None
     accept_timeout_task: asyncio.Task | None = None
     silence_feedback_task: asyncio.Task | None = None
 
@@ -137,11 +136,10 @@ async def session_websocket(websocket: WebSocket, session_id: str):
 
     skipped_count: int = 0
 
-    QUESTION_ACCEPT_TIMEOUT_SEC = 30.0
+    QUESTION_ACCEPT_TIMEOUT_SEC = 20.0
     MAX_FOLLOW_UPS = 2
 
     ANSWER_SILENCE_SEC = 3.0
-    NO_ANSWER_TIMEOUT_SEC = 12.0
 
     # 발표 중 실시간 침묵 피드백: 마지막 발화 이후 이 시간(초) 동안 다음 발화가 없으면 안내한다.
     SILENCE_FEEDBACK_SEC = 5.0
@@ -286,15 +284,10 @@ async def session_websocket(websocket: WebSocket, session_id: str):
 
     async def cancel_answer_timers():
         nonlocal answer_timer_task
-        nonlocal no_answer_timer_task
 
         if answer_timer_task and not answer_timer_task.done():
             answer_timer_task.cancel()
         answer_timer_task = None
-
-        if no_answer_timer_task and not no_answer_timer_task.done():
-            no_answer_timer_task.cancel()
-        no_answer_timer_task = None
 
     async def cancel_accept_timeout():
         nonlocal accept_timeout_task
@@ -443,40 +436,6 @@ async def session_websocket(websocket: WebSocket, session_id: str):
 
         answer_timer_task = asyncio.create_task(evaluate_and_maybe_follow_up())
 
-    async def start_no_answer_timer():
-        nonlocal no_answer_timer_task
-
-        if no_answer_timer_task and not no_answer_timer_task.done():
-            no_answer_timer_task.cancel()
-
-        no_answer_timer_task = asyncio.create_task(handle_no_answer_timeout())
-
-    async def handle_no_answer_timeout():
-        try:
-            await asyncio.sleep(NO_ANSWER_TIMEOUT_SEC)
-        except asyncio.CancelledError:
-            return
-
-        current_state = await sr.get_state()
-
-        if _is_state(current_state, SessionState.ANSWERING) and not answer_started:
-            print("\n========== [답변 없음] ==========")
-            print(f"질문 ID: {current_question_id}")
-            print(f"질문 내용: {current_question}")
-            print(f"{NO_ANSWER_TIMEOUT_SEC}초 동안 답변이 없어 발표로 복귀합니다.")
-            print("===============================\n")
-
-            await safe_broadcast({
-                "type": "answer_timeout",
-                "question_id": current_question_id,
-                "parent_question_id": parent_question_id,
-                "question_text": current_question,
-                "message": "답변이 없어 발표로 복귀합니다.",
-            })
-
-            log_follow_up_finished("답변 없음")
-            await resume_presentation()
-
     async def enter_answering_state():
         """
         답변 상태로 진입한다.
@@ -501,8 +460,6 @@ async def session_websocket(websocket: WebSocket, session_id: str):
             await safe_broadcast(make_session_state(SessionState.ANSWERING))
         except Exception as e:
             print(f"[ANSWERING 상태 전환 에러] {e}")
-
-        await start_no_answer_timer()
 
     # ============================================================
     # TTS 생성 + 실패 fallback
@@ -802,7 +759,6 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         nonlocal answer_started
         nonlocal answer_started_at
         nonlocal last_answer_at
-        nonlocal no_answer_timer_task
 
         clean_text = text.strip()
 
@@ -822,10 +778,6 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         if not answer_started:
             answer_started = True
             answer_started_at = now
-
-            if no_answer_timer_task and not no_answer_timer_task.done():
-                no_answer_timer_task.cancel()
-                no_answer_timer_task = None
 
             log_answer_started()
 
