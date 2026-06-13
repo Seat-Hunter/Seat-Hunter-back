@@ -1,17 +1,24 @@
 # 세션 종료 후 전체 로그를 종합하여 최종 리포트를 생성하는 Report Generator 서비스
-# 이 서비스는 요약 통계, 강점/약점/개선 포인트, overall score, recovery score,
-# 누적 패턴 업데이트, 다음 커리큘럼 추천까지 수행한다.
+# 이 서비스는 요약 통계, 기준별(rubric) LLM 평가를 통한 강점/개선 포인트/실천 방법,
+# overall score, 대응 점수(response_score), 누적 패턴 업데이트, 다음 커리큘럼 추천까지 수행한다.
 
-import json
 from statistics import mean
 
 from google import genai
+from google.genai import types
 
 from app.core.config import settings
+from app.schemas.evaluation import (
+    PresentationEvaluationResult,
+    STRENGTH_THRESHOLD,
+    CRITERION_LABELS,
+    get_weights,
+)
 from app.schemas.report import (
     ReportGenerationInput,
     ReportGenerationResult,
     ReportSummary,
+    CriterionScoreItem,
     UserPatternOutput,
 )
 
@@ -31,9 +38,8 @@ class ReportService:
 
     주요 기능
     - 세션 요약 통계 계산
-    - Recovery Score 계산
-    - Overall Score 계산
-    - 강점 / 약점 / 개선 포인트 도출
+    - 기준별(rubric) LLM 평가 → overall_score / 대응 점수(response_score) / 강점·개선 포인트·실천 방법
+    - LLM 평가 실패 시 규칙 기반 폴백
     - 누적 패턴 갱신
     - 다음 추천 커리큘럼 생성
     """
@@ -43,37 +49,30 @@ class ReportService:
         전체 세션 데이터를 바탕으로 종합 리포트를 생성한다.
         """
         summary = self._build_summary(data)
-        recovery_score = self._calculate_recovery_score(data)
-        updated_pattern = self._update_user_pattern(
-            data, self._extract_weaknesses(data, summary, recovery_score)
-        )
+        has_qa = summary.interrupt_count > 0
 
-        ai_feedback = self._generate_ai_feedback(summary, recovery_score, data)
+        eval_result = self._generate_evaluation(summary, data, has_qa)
 
-        if ai_feedback:
-            strengths = ai_feedback.get("strengths") or self._extract_strengths(data, summary, recovery_score)
-            weaknesses = ai_feedback.get("weaknesses") or self._extract_weaknesses(data, summary, recovery_score)
-            improvements = ai_feedback.get("improvements") or self._build_improvements(weaknesses)
-            curriculum_next = ai_feedback.get("curriculum_next") or self._recommend_curriculum(
-                updated_pattern=updated_pattern,
-                weaknesses=weaknesses,
-                recovery_score=recovery_score,
-            )
+        if eval_result:
+            overall_score, response_score, strengths, weaknesses, improvements, criteria_scores, curriculum_next = \
+                self._apply_evaluation(eval_result, has_qa, data, summary)
         else:
-            weaknesses = self._extract_weaknesses(data, summary, recovery_score)
-            strengths = self._extract_strengths(data, summary, recovery_score)
+            response_score = self._calculate_fallback_response_score(data)
+            weaknesses = self._extract_weaknesses(data, summary, response_score)
+            strengths = self._extract_strengths(data, summary, response_score)
             improvements = self._build_improvements(weaknesses)
+            overall_score = self._calculate_overall_score(summary, response_score, weaknesses)
+            criteria_scores = []
+            curriculum_next = None  # updated_pattern 계산 후 채움
+
+        updated_pattern = self._update_user_pattern(data, weaknesses)
+
+        if curriculum_next is None:
             curriculum_next = self._recommend_curriculum(
                 updated_pattern=updated_pattern,
                 weaknesses=weaknesses,
-                recovery_score=recovery_score,
+                response_score=response_score,
             )
-
-        overall_score = self._calculate_overall_score(
-            summary=summary,
-            recovery_score=recovery_score,
-            weaknesses=weaknesses,
-        )
 
         return ReportGenerationResult(
             summary=summary,
@@ -81,78 +80,72 @@ class ReportService:
             weaknesses=weaknesses,
             improvements=improvements,
             overall_score=round(overall_score, 2),
-            recovery_score=round(recovery_score, 2),
+            response_score=round(response_score, 2) if response_score is not None else None,
+            criteria_scores=criteria_scores,
             curriculum_next=curriculum_next,
             updated_pattern=updated_pattern,
         )
 
-    def _generate_ai_feedback(
+    def _apply_evaluation(
+        self,
+        eval_result: PresentationEvaluationResult,
+        has_qa: bool,
+        data: ReportGenerationInput,
+        summary: ReportSummary,
+    ) -> tuple[float, float | None, list[str], list[str], list[str], list[CriterionScoreItem], str]:
+        """
+        LLM 기준별 평가 결과를 overall_score / response_score / 강점·개선 포인트·실천 방법 / 기준별 점수로 변환한다.
+        """
+        weights = get_weights(has_qa=has_qa)
+        total_weight = sum(weights.get(c.criterion_id, 0.0) for c in eval_result.criteria)
+        if total_weight > 0:
+            overall_score = sum(
+                c.score * weights.get(c.criterion_id, 0.0) for c in eval_result.criteria
+            ) / total_weight
+        else:
+            overall_score = mean(c.score for c in eval_result.criteria) if eval_result.criteria else 0.0
+
+        criteria_by_id = {c.criterion_id: c for c in eval_result.criteria}
+        qa_criterion = criteria_by_id.get("qa_response")
+        response_score = float(qa_criterion.score) if qa_criterion else None
+
+        strengths: list[str] = []
+        weaknesses: list[str] = []
+        improvements: list[str] = []
+        criteria_scores: list[CriterionScoreItem] = []
+
+        for c in eval_result.criteria:
+            criteria_scores.append(CriterionScoreItem(
+                criterion_id=c.criterion_id,
+                label=CRITERION_LABELS.get(c.criterion_id, c.criterion_id),
+                score=c.score,
+            ))
+
+            if c.score >= STRENGTH_THRESHOLD:
+                strengths.append(c.diagnosis)
+            else:
+                weaknesses.append(c.diagnosis)
+                improvements.append(c.action_item)
+
+        if not strengths:
+            strengths = self._extract_strengths(data, summary, response_score)
+        if not weaknesses:
+            weaknesses = self._extract_weaknesses(data, summary, response_score)
+        if not improvements:
+            improvements = self._build_improvements(weaknesses)
+
+        return overall_score, response_score, strengths, weaknesses, improvements, criteria_scores, eval_result.overall_comment
+
+    def _generate_evaluation(
         self,
         summary: ReportSummary,
-        recovery_score: float,
         data: ReportGenerationInput,
-    ) -> dict | None:
+        has_qa: bool,
+    ) -> PresentationEvaluationResult | None:
         if _gemini_client is None:
             return None
 
-        transcript_text = data.transcript_text or " ".join(seg.text for seg in data.transcript[:20])
-
-        qa_lines = []
-        for item in data.answer_evaluation_log:
-            qa_lines.append(
-                f"Q: {item.question_text}\nA: {item.user_answer}\n점수: {item.answer_score}/100"
-            )
-
-        script_section = ""
-        if data.script_text:
-            script_section = f"""
-## 준비 대본
-{data.script_text[:800]}
-
-## 발표 평가 기준
-실제 발화 내용을 준비 대본과 비교하여:
-- 대본 내용이 제대로 전달됐는지
-- 핵심 포인트가 빠지지 않았는지
-- 발표다운 어조와 구성인지를 평가하세요.
-발화 내용이 대본과 너무 다르거나 극히 짧다면 "발표를 제대로 수행하지 않았다"고 명시하세요."""
-
-        transcript_section = transcript_text if transcript_text.strip() else "발화 내용 없음 (마이크 미사용 또는 발화량 극히 적음)"
-
-        transcript_word_count = len(transcript_text.split()) if transcript_text.strip() else 0
-        is_empty_presentation = transcript_word_count < 10
-
-        prompt = f"""당신은 발표 코칭 전문가입니다. 아래 데이터를 분석해 발표자가 "왜 이 결과가 나왔는지"와 "어떻게 개선할 수 있는지"를 명확히 이해할 수 있는 피드백을 작성하세요.
-
-## 세션 지표
-- 평균 WPM: {summary.avg_wpm} (적정: 100~160)
-- 필러 단어: {summary.filler_count}회 (5회 이상이면 유창성 저하)
-- 침묵 구간: {summary.silence_count}회
-- 돌발 질문: {summary.interrupt_count}회
-- 평균 답변 점수: {summary.avg_answer_score:.1f}/100
-- 회복 점수: {recovery_score:.1f}/100
-- 발화 단어 수: {transcript_word_count}단어
-{script_section}
-## 실제 발화 내용
-{transcript_section}
-
-## 질의응답 기록
-{chr(10).join(qa_lines) if qa_lines else "질의응답 없음"}
-
-아래 JSON 형식으로만 응답하세요 (코드블록·설명 없이 JSON만):
-{{
-  "strengths": ["강점 설명 (왜 잘했는지 이유 포함)"],
-  "weaknesses": ["약점 설명 (수치 근거 + 왜 문제인지 인과관계 설명)"],
-  "improvements": ["약점별 구체적 개선 행동 (언제, 무엇을, 어떻게 연습할지)"],
-  "curriculum_next": "가장 시급한 약점 한 가지를 위한 다음 훈련 (한 문장)"
-}}
-
-작성 규칙:
-- 발화 단어 수가 10 미만이면 weaknesses[0]에 반드시: "발표가 거의 수행되지 않아 WPM·필러·침묵 지표를 신뢰할 수 없습니다. 마이크를 켜고 실제로 말하면서 연습하세요."
-- 준비 대본이 있고 실제 발화와 내용이 크게 다르거나 빠진 핵심 포인트가 있으면 weaknesses에 명시
-- strengths: 2~3개. 단순히 "좋다"가 아니라 "수치 X이기 때문에 Y 효과가 있다" 형식
-- weaknesses: 2~3개. "수치 X → 이것이 Y 문제를 유발한다 → 청중에게 Z 영향을 미친다" 인과관계로 작성
-- improvements: weaknesses 각각에 1:1 대응. "하루 N분씩 X 연습" 같은 즉시 실천 가능한 구체적 행동
-- curriculum_next: "~을 위한 ~훈련" 형식의 한 문장"""
+        prompt = self._build_evaluation_prompt(summary, data, has_qa)
 
         result_box: list = [None]
         error_box: list = [None]
@@ -162,6 +155,10 @@ class ReportService:
                 result_box[0] = _gemini_client.models.generate_content(
                     model="gemini-2.5-flash",
                     contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=PresentationEvaluationResult,
+                    ),
                 )
             except Exception as exc:
                 error_box[0] = exc
@@ -171,23 +168,118 @@ class ReportService:
         t.start()
         t.join()
 
-        if error_box[0] is None and result_box[0] is None:
-            print("[Gemini 피드백 오류] 결과 없음 — 규칙 기반 폴백")
+        if error_box[0] is not None:
+            print(f"[Gemini 평가 오류] {type(error_box[0]).__name__}: {error_box[0]}")
             return None
 
-        if error_box[0] is not None:
-            print(f"[Gemini 피드백 오류] {type(error_box[0]).__name__}: {error_box[0]}")
+        if result_box[0] is None:
+            print("[Gemini 평가 오류] 결과 없음 — 규칙 기반 폴백")
             return None
 
         try:
-            text = result_box[0].text.strip()
-            if text.startswith("```"):
-                parts = text.split("```")
-                text = parts[1].lstrip("json").strip() if len(parts) > 1 else text
-            return json.loads(text)
+            return PresentationEvaluationResult.model_validate_json(result_box[0].text)
         except Exception as e:
-            print(f"[Gemini 파싱 오류] {e}")
+            print(f"[Gemini 평가 파싱 오류] {e}")
             return None
+
+    def _build_evaluation_prompt(
+        self,
+        summary: ReportSummary,
+        data: ReportGenerationInput,
+        has_qa: bool,
+    ) -> str:
+        transcript_text = data.transcript_text or " ".join(seg.text for seg in data.transcript[:20])
+        transcript_section = transcript_text if transcript_text.strip() else "발화 내용 없음 (마이크 미사용 또는 발화량 극히 적음)"
+        transcript_word_count = len(transcript_text.split()) if transcript_text.strip() else 0
+        is_empty_presentation = transcript_word_count < 10
+
+        qa_lines = []
+        for item in data.answer_evaluation_log:
+            qa_lines.append(
+                f"Q: {item.question_text}\nA: {item.user_answer}\n점수: {item.answer_score}/100"
+            )
+        qa_section = chr(10).join(qa_lines) if qa_lines else "질의응답 없음"
+
+        script_section = ""
+        if data.script_text:
+            script_section = f"""
+## 준비 대본
+{data.script_text[:800]}
+
+## 발표 평가 기준
+실제 발화 내용을 준비 대본과 비교하여 대본 내용이 제대로 전달됐는지, 핵심 포인트가 빠지지 않았는지를
+logical_structure / message_clarity 평가에 반영하세요. 발화 내용이 대본과 너무 다르거나 극히 짧다면
+"발표를 제대로 수행하지 않았다"고 명시하세요.
+"""
+
+        if has_qa:
+            qa_criterion_block = """
+### 4. qa_response (질문 대응력/회복력)
+질문 의도에 맞는 답변을 했는지, 인터럽트 이후 발표 흐름을 얼마나 빨리 회복했는지 평가합니다.
+- 90~100: 질문 의도를 정확히 파악해 구체적 근거/예시로 답변, 빠르게 회복
+- 70~89: 답변은 했으나 구체성/근거 부족, 회복은 양호
+- 50~69: 답변이 질문 의도와 다소 어긋나거나 회복이 느림
+- 0~49: 답변 회피 또는 매우 부실, 회복 실패
+"""
+            criteria_instruction = "criteria 배열에 logical_structure, message_clarity, delivery_fluency, qa_response 4개를 모두 포함하세요."
+        else:
+            qa_criterion_block = ""
+            criteria_instruction = "이번 세션에는 질의응답이 없었으므로 criteria 배열에 qa_response를 포함하지 말고 logical_structure, message_clarity, delivery_fluency 3개만 평가하세요."
+
+        empty_instruction = ""
+        if is_empty_presentation:
+            empty_instruction = """
+- 발화 단어 수가 10 미만입니다. 모든 criterion의 evidence/diagnosis에
+  "발표가 거의 수행되지 않아 해당 기준을 신뢰성 있게 평가할 수 없습니다"를 반영하고 0~30점 사이의 낮은 점수를 부여하세요.
+  action_item에는 "마이크를 켜고 실제로 말하면서 연습하세요"를 포함하세요."""
+
+        return f"""당신은 발표 코칭 전문가입니다. 아래 [평가 기준]에 따라 발표를 분석하고,
+기준별로 점수(0~100)와 evidence(근거), diagnosis(진단), action_item(실천 항목)을 작성하세요.
+
+## 평가 기준
+
+### 1. logical_structure (논리적 구조/흐름)
+발표가 도입-본론-결론 구조를 갖추고, 주장과 근거의 순서가 청중이 따라가기 쉽게 배치되었는지 평가합니다.
+- 90~100: 구조가 명확하고 섹션 간 전환이 자연스러우며 근거 순서가 논리적
+- 70~89: 구조는 있으나 일부 전환이 어색하거나 근거 순서가 비효율적
+- 50~69: 구조가 느슨하여 청중이 흐름을 따라가기 어려움
+- 0~49: 구조를 식별하기 어렵고 내용이 산발적
+
+### 2. message_clarity (핵심 메시지 전달력)
+발표의 핵심 주장/결론이 명확히 제시되고 청중에게 각인되는지 평가합니다.
+- 90~100: 핵심 메시지가 명확하고 반복/강조되어 기억에 남음
+- 70~89: 핵심 메시지는 있으나 부수적 내용에 묻히거나 한 번만 언급됨
+- 50~69: 핵심 메시지가 모호하거나 여러 메시지가 경쟁함
+- 0~49: 핵심 메시지를 식별할 수 없음
+
+### 3. delivery_fluency (전달력/유창성)
+WPM, 필러 단어, 침묵 구간을 바탕으로 발화가 매끄럽게 전달되었는지 평가합니다.
+- 90~100: WPM 100~160 범위이고 필러·침묵이 거의 없음
+- 70~89: 대체로 안정적이나 일부 구간에서 속도/필러/침묵 문제
+- 50~69: 말속도 또는 필러/침묵 중 한 가지 이상이 뚜렷한 문제
+- 0~49: 여러 지표가 동시에 문제
+{qa_criterion_block}
+## 세션 데이터
+- 평균 WPM: {summary.avg_wpm} (적정: 100~160)
+- 필러 단어: {summary.filler_count}회 (5회 이상이면 유창성 저하)
+- 침묵 구간: {summary.silence_count}회
+- 돌발 질문: {summary.interrupt_count}회
+- 평균 답변 점수: {summary.avg_answer_score:.1f}/100
+- 발화 단어 수: {transcript_word_count}단어
+{script_section}
+## 실제 발화 내용
+{transcript_section}
+
+## 질의응답 기록
+{qa_section}
+
+## 작성 지침
+- {criteria_instruction}
+- evidence: 점수의 근거가 되는 부분을 한 문장 이내로 짧게 요약하세요. 발화/대본을 통째로 길게 인용하지 말고,
+  핵심 단어나 짧은 구절만 뽑아 제시하세요.
+- diagnosis: 이 점수가 나온 이유와 청중에게 미치는 영향을 2문장 이내로 간결하게 설명하세요.
+- action_item: 다음 발표에서 바로 실천할 수 있는 구체적 행동을 한 문장으로 제시하세요.{empty_instruction}
+- overall_comment: 발표 전체에 대한 총평을 1~2문장으로 작성하세요."""
 
     def _build_summary(self, data: ReportGenerationInput) -> ReportSummary:
         """
@@ -221,9 +313,9 @@ class ReportService:
             avg_answer_score=round(avg_answer_score, 2)
         )
 
-    def _calculate_recovery_score(self, data: ReportGenerationInput) -> float:
+    def _calculate_fallback_response_score(self, data: ReportGenerationInput) -> float:
         """
-        Recovery Score 계산
+        LLM 평가가 실패했을 때 사용하는 대응 점수(response_score) 폴백 계산
 
         가중치 예시
         - WPM 회복 속도: 40%
@@ -244,10 +336,10 @@ class ReportService:
         self,
         data: ReportGenerationInput,
         summary: ReportSummary,
-        recovery_score: float
+        response_score: float | None,
     ) -> list[str]:
         """
-        세션 강점 도출
+        세션 강점 도출 (규칙 기반 폴백)
         """
         strengths = []
 
@@ -260,8 +352,8 @@ class ReportService:
         if summary.avg_answer_score >= 75:
             strengths.append("질문에 대한 답변 대응력이 좋습니다.")
 
-        if recovery_score >= 75:
-            strengths.append("인터럽트 이후 회복 속도가 빠릅니다.")
+        if response_score is not None and response_score >= 75:
+            strengths.append("질문에 대한 대응 및 회복 속도가 빠릅니다.")
 
         if not strengths:
             strengths.append("전반적으로 발표를 끝까지 유지한 점이 좋습니다.")
@@ -272,10 +364,10 @@ class ReportService:
         self,
         data: ReportGenerationInput,
         summary: ReportSummary,
-        recovery_score: float
+        response_score: float | None,
     ) -> list[str]:
         """
-        세션 약점 도출
+        세션 약점 도출 (규칙 기반 폴백)
         """
         weaknesses = []
 
@@ -293,8 +385,8 @@ class ReportService:
         if summary.avg_answer_score < 60 and data.answer_evaluation_log:
             weaknesses.append("질문에 대한 답변 구체성이 부족합니다.")
 
-        if recovery_score < 60:
-            weaknesses.append("인터럽트 이후 회복이 느린 편입니다.")
+        if response_score is not None and response_score < 60:
+            weaknesses.append("질문에 대한 대응 및 회복이 느린 편입니다.")
 
         if not weaknesses:
             weaknesses.append("뚜렷한 약점은 적지만 세부 표현을 더 다듬을 여지가 있습니다.")
@@ -303,7 +395,7 @@ class ReportService:
 
     def _build_improvements(self, weaknesses: list[str]) -> list[str]:
         """
-        약점을 개선 포인트로 변환
+        약점을 개선 포인트로 변환 (규칙 기반 폴백)
         """
         improvements = []
 
@@ -316,7 +408,7 @@ class ReportService:
                 improvements.append("예상 질문에 대한 답변 템플릿을 준비해 침묵 구간을 줄여보세요.")
             elif "답변 구체성" in weakness:
                 improvements.append("답변에 이유, 예시, 근거를 함께 넣는 방식으로 구체성을 높여보세요.")
-            elif "회복" in weakness:
+            elif "대응" in weakness or "회복" in weakness:
                 improvements.append("인터럽트 직후 핵심 키워드부터 다시 꺼내 말하는 회복 훈련이 필요합니다.")
 
         if not improvements:
@@ -327,21 +419,22 @@ class ReportService:
     def _calculate_overall_score(
         self,
         summary: ReportSummary,
-        recovery_score: float,
+        response_score: float | None,
         weaknesses: list[str]
     ) -> float:
         """
-        Overall Score 계산
+        LLM 평가가 실패했을 때 사용하는 overall_score 폴백 계산
 
         단순 예시 기준
         - 평균 답변 점수
-        - 회복 점수
+        - 대응 점수(response_score)
         - 필러 / 침묵 / 약점 개수 패널티
         """
         base = 50.0
 
         base += min(summary.avg_answer_score * 0.3, 30.0)
-        base += recovery_score * 0.2
+        if response_score is not None:
+            base += response_score * 0.2
 
         if summary.filler_count >= 5:
             base -= 8
@@ -401,10 +494,10 @@ class ReportService:
         self,
         updated_pattern: UserPatternOutput,
         weaknesses: list[str],
-        recovery_score: float
+        response_score: float | None,
     ) -> str:
         """
-        다음 추천 커리큘럼 생성
+        다음 추천 커리큘럼 생성 (규칙 기반 폴백)
         """
         if updated_pattern.session_count >= 5 and updated_pattern.repeated_weaknesses:
             if any("필러" in item for item in updated_pattern.repeated_weaknesses):
@@ -416,7 +509,7 @@ class ReportService:
             if any("답변 구체성" in item for item in updated_pattern.repeated_weaknesses):
                 return "근거·예시 확장 훈련 — STAR 방식 답변 연습"
 
-        if recovery_score < 60:
+        if response_score is not None and response_score < 60:
             return "압박 질문 대응 훈련 — 인터럽트 직후 회복 연습"
 
         if any("말속도" in weakness for weakness in weaknesses):

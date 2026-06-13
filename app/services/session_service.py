@@ -106,7 +106,7 @@ class SessionService:
             )
             silence_count = metrics.get("silence_count", 0)
 
-            # 회복 점수: 실제 세션 데이터 기반 산출
+            # 대응 점수(response_score) 폴백 계산용 입력 (LLM 평가 실패 시에만 사용)
             wpm = actual_avg_wpm
             if 100 <= wpm <= 160:
                 wpm_recovery = 80.0
@@ -170,11 +170,14 @@ class SessionService:
                 "filler_count":   result.summary.filler_count,
                 "silence_count":  silence_count,
                 "interrupt_count": len(interrupt_list),
-                "recovery_score": result.recovery_score,
+                "recovery_score": result.response_score if result.response_score is not None else 0,
                 "overall_score":  result.overall_score,
                 "strengths":      json.dumps(result.strengths,    ensure_ascii=False),
                 "weaknesses":     json.dumps(result.weaknesses,   ensure_ascii=False),
                 "feedback":       json.dumps(result.improvements, ensure_ascii=False),
+                "criteria_scores": json.dumps(
+                    [item.model_dump() for item in result.criteria_scores], ensure_ascii=False
+                ),
                 "curriculum_next": result.curriculum_next,
                 "interrupts":     json.dumps(interrupt_list,      ensure_ascii=False),
             }).eq("session_id", session_id).execute()

@@ -98,6 +98,15 @@ class UserPatternOutput(BaseModel):
     trend: str
 
 
+class CriterionScoreItem(BaseModel):
+    """
+    프론트엔드에 표시할 기준별 점수 한 건
+    """
+    criterion_id: str
+    label: str
+    score: int
+
+
 class ReportGenerationResult(BaseModel):
     """
     최종 리포트 생성 결과
@@ -107,7 +116,8 @@ class ReportGenerationResult(BaseModel):
     weaknesses: List[str]
     improvements: List[str]
     overall_score: float
-    recovery_score: float
+    response_score: Optional[float] = None
+    criteria_scores: List[CriterionScoreItem] = Field(default_factory=list)
     curriculum_next: str
     updated_pattern: UserPatternOutput
 
