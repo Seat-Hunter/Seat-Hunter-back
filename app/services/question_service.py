@@ -117,7 +117,6 @@ class QuestionService:
 
             question_text = result.output_text.strip().splitlines()[0]
             question_text = self._clean_generated_question(question_text)
-            question_text = self._simplify_question_if_compound(question_text)
 
             if not question_text:
                 return self.generate_question(data)
@@ -262,7 +261,6 @@ class QuestionService:
 
             if follow_up:
                 follow_up = self._clean_generated_question(str(follow_up))
-                follow_up = self._simplify_question_if_compound(follow_up)
 
             return AnswerEvaluationResult(
                 answer_score=round(score, 2),
@@ -304,7 +302,6 @@ class QuestionService:
         )
 
         question_text = self._clean_generated_question(question_text)
-        question_text = self._simplify_question_if_compound(question_text)
 
         return QuestionGenerationResult(
             question_text=question_text,
@@ -344,7 +341,6 @@ class QuestionService:
                 pressure_level=data.pressure_level
             )
             follow_up_question = self._clean_generated_question(follow_up_question)
-            follow_up_question = self._simplify_question_if_compound(follow_up_question)
 
         return AnswerEvaluationResult(
             answer_score=round(answer_score, 2),
@@ -394,80 +390,6 @@ class QuestionService:
             question += "?"
 
         return question
-
-    def _simplify_question_if_compound(self, question: str) -> str:
-        """
-        질문이 너무 복합적으로 생성된 경우 첫 번째 질문만 남긴다.
-        너무 강하게 자르면 어색해질 수 있으므로 기본적인 연결 표현만 처리한다.
-        """
-        if not question:
-            return ""
-
-        original = re.sub(r"\s+", " ", question.strip())
-
-        compound_markers = [
-            " 그리고 ",
-            " 또한 ",
-            " 또는 ",
-            " 동시에 ",
-            "뿐만 아니라",
-            "뿐 아니라",
-            "장점과 단점",
-            "장단점",
-            "가능성과 한계",
-            "기대효과와 한계",
-            "차이점과 장점",
-            "이유와 과정",
-            "방법과 기준",
-        ]
-
-        simplified = original
-
-        for marker in compound_markers:
-            if marker in simplified:
-                simplified = simplified.split(marker)[0].strip()
-                break
-
-        cut_markers = [
-            "이고,",
-            "이며,",
-            "하며,",
-            "하고,",
-            "인지,",
-            "이며 동시에",
-        ]
-
-        for marker in cut_markers:
-            if marker in simplified:
-                simplified = simplified.split(marker)[0].strip()
-                break
-
-        comma_patterns = [
-            ", 왜",
-            ", 어떻게",
-            ", 무엇",
-            ", 어떤",
-            ", 어느",
-            ", 실제로",
-        ]
-
-        for pattern in comma_patterns:
-            if pattern in simplified:
-                simplified = simplified.split(pattern)[0].strip()
-                break
-
-        if len(simplified) < 10:
-            simplified = original
-
-        if simplified.endswith(("은", "는", "이", "가", "을", "를", "의", "와", "과", "로", "으로")):
-            simplified = original
-
-        if simplified and not simplified.endswith("?"):
-            if simplified.endswith("."):
-                simplified = simplified[:-1].strip()
-            simplified += "?"
-
-        return simplified
 
     def _select_question_type(
         self,
