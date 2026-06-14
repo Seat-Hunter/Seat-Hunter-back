@@ -137,6 +137,10 @@ async def session_websocket(websocket: WebSocket, session_id: str):
 
     skipped_count: int = 0
 
+    # 평균 WPM 계산에서 제외할 비발표 시간(질문 청취/답변/평가 대기) 누적
+    non_presenting_started_at: float | None = None
+    non_presenting_ms_total: float = 0.0
+
     QUESTION_ACCEPT_TIMEOUT_SEC = 20.0
     MAX_FOLLOW_UPS = 2
 
@@ -347,6 +351,8 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         nonlocal parent_question_id
         nonlocal follow_up_count
         nonlocal answer_buffer
+        nonlocal non_presenting_started_at
+        nonlocal non_presenting_ms_total
 
         try:
             await asyncio.sleep(QUESTION_ACCEPT_TIMEOUT_SEC)
@@ -385,6 +391,10 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         follow_up_count = 0
         answer_buffer.clear()
 
+        if non_presenting_started_at is not None:
+            non_presenting_ms_total += time.time() * 1000 - non_presenting_started_at
+            non_presenting_started_at = None
+
         await safe_set_tts_playing(False)
 
         try:
@@ -403,6 +413,8 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         nonlocal answer_started
         nonlocal answer_started_at
         nonlocal last_answer_at
+        nonlocal non_presenting_started_at
+        nonlocal non_presenting_ms_total
 
         current_question = None
         current_question_id = None
@@ -413,6 +425,10 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         answer_started = False
         answer_started_at = None
         last_answer_at = None
+
+        if non_presenting_started_at is not None:
+            non_presenting_ms_total += time.time() * 1000 - non_presenting_started_at
+            non_presenting_started_at = None
 
         await cancel_answer_timers()
         await cancel_accept_timeout()
@@ -461,7 +477,12 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         is_follow_up: bool = False,
         follow_up_count_value: int = 0,
     ) -> bool:
+        nonlocal non_presenting_started_at
+
         await safe_set_tts_playing(True)
+
+        if non_presenting_started_at is None:
+            non_presenting_started_at = time.time() * 1000
 
         try:
             await sr.set_state(SessionState.INTERRUPTED)
@@ -557,6 +578,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                 end_ms=end_ms,
                 is_speaking=True,
                 is_interrupt=False,
+                excluded_ms=int(non_presenting_ms_total),
             ))
 
             await sr.set_metrics({

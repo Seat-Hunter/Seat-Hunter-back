@@ -48,7 +48,7 @@ class SpeechAnalysisService:
 
         # 보정된 recent_wpm을 기반으로 평균을 내거나, 
         # 혹은 가용 가능한 평균값을 안전하게 가져옵니다.
-        average_wpm = self.wpm_calculator.get_average_wpm(end_ms)
+        average_wpm = self.wpm_calculator.get_average_wpm(end_ms, data.excluded_ms)
         
         # 만약 전체 평균값마저 기존 노이즈 때문에 여전히 너무 크게 뜨는 구조라면 
         # 아래 안전망까지 같이 추가해 주는 것이 안전합니다.

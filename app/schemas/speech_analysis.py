@@ -10,6 +10,7 @@ class SpeechAnalysisInput(BaseModel):
     end_ms: int
     is_speaking: bool
     is_interrupt: bool = False
+    excluded_ms: int = 0  # 질문 청취/답변/평가 대기 등 평균 WPM 계산에서 제외할 누적 시간(ms)
 
 
 class SpeechAnalysisResult(BaseModel):

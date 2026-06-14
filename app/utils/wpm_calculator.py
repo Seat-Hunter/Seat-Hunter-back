@@ -42,10 +42,10 @@ class WPMCalculator:
         minutes = self.window_seconds / 60
         return words / minutes if minutes > 0 else 0.0
 
-    def get_average_wpm(self, current_time_ms: int) -> float:
-        """전체 평균 WPM 계산"""
+    def get_average_wpm(self, current_time_ms: int, excluded_ms: int = 0) -> float:
+        """전체 평균 WPM 계산 (질문 청취/답변/평가 대기 등 비발표 시간은 excluded_ms로 제외)"""
         if self.start_time is None:
             return 0.0
 
-        elapsed_minutes = (current_time_ms - self.start_time) / 60000
+        elapsed_minutes = (current_time_ms - self.start_time - excluded_ms) / 60000
         return self.total_words / elapsed_minutes if elapsed_minutes > 0 else 0.0
