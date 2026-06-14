@@ -156,14 +156,26 @@ class QuestionService:
 
         can_generate_follow_up = follow_up_count < max_follow_ups
 
+        qa_history = getattr(data, "qa_history", None) or []
+        if qa_history:
+            history_text = "\n".join(
+                f"{i + 1}) Q: {item.get('question', '')}\n   A: {item.get('answer', '')}"
+                for i, item in enumerate(qa_history)
+            )
+        else:
+            history_text = "없음 (이번이 이 질문 흐름의 첫 평가)"
+
         prompt = f"""
 너는 발표 Q&A 상황에서 발표자의 답변을 평가하는 평가자다.
 질문에 대해 사용자의 답변이 충분한지 판단해라.
 
-[질문]
+[이 질문 흐름에서 지금까지 나온 질문/답변]
+{history_text}
+
+[이번 질문]
 {data.question_text}
 
-[사용자 답변]
+[이번 사용자 답변]
 {data.user_answer}
 
 [현재 발표 주제]
@@ -182,6 +194,7 @@ class QuestionService:
 - 답변이 구체적인가?
 - 발표 맥락과 연결되는가?
 - 이유나 예시가 있는가?
+- [이 질문 흐름에서 지금까지 나온 질문/답변]을 종합했을 때, 이번 답변까지 포함하면 충분히 답변된 것으로 볼 수 있는가?
 
 반드시 JSON만 출력해라.
 형식은 아래와 같다.
@@ -201,14 +214,21 @@ class QuestionService:
 }}
 
 규칙:
-- score가 70 이상이면 sufficient는 true다.
-- score가 70 미만이면 sufficient는 false다.
-- 꼬리질문 생성 가능 여부가 false이면 follow_up은 반드시 null이다.
-- sufficient가 false이고 꼬리질문 생성 가능 여부가 true이면 follow_up에 짧은 꼬리질문을 작성한다.
-- sufficient가 true이면 follow_up은 null이다.
-- follow_up은 사용자의 답변에서 부족한 부분을 자연스럽게 되묻는 질문이어야 한다.
-- follow_up은 새로운 주제를 꺼내지 않는다.
-- follow_up은 한 문장으로만 작성한다.
+
+[최우선 예외 — 다른 규칙보다 먼저 확인]
+- 사용자의 답변이 "모르겠다/잘 모르겠습니다/모름/글쎄요/생각해본 적 없다/필요 없습니다/됐습니다/없습니다"처럼 답변을 회피하거나 더 답할 의사가 없음을 나타내면, 즉시 sufficient=true, follow_up=null로 처리한다. "왜 모르는지", "어떤 정보가 있으면 답할 수 있는지"처럼 회피 자체를 다시 캐묻지 않는다.
+- 꼬리질문 생성 가능 여부가 false이면 sufficient=true, follow_up=null로 처리한다.
+
+[sufficient 판단 기준]
+- score(0~100)는 리포트 표시용 참고 지표일 뿐이며, sufficient나 follow_up 여부 판단에는 사용하지 않는다.
+- 질문의 핵심 요구에 답변이 응답했다면, 디테일이나 깊이가 부족해 점수가 낮더라도 그것만으로 false 처리하지 않는다. 핵심을 벗어났거나 응답 자체가 누락된 경우에만 false로 판단한다.
+- 이번 답변이나 이전 답변에서 이미 비슷한 요청(예: 구체적인 예시, 직군, 사례)에 충분히 응답했다면, 같은 종류의 요구를 또 하지 말고 true로 판단한다.
+- 더 물어볼 자연스러운 질문이 떠오르지 않으면 억지로 만들지 말고 true로 처리한다.
+
+[follow_up 작성 규칙 — sufficient=false일 때만 적용]
+- follow_up은 한 문장으로, 새로운 주제를 꺼내지 않고, 답변에서 부족한 부분만 자연스럽게 되묻는다.
+- [이 질문 흐름에서 지금까지 나온 질문/답변]에 나온 질문들과 핵심 요구가 본질적으로 같으면 안 된다. 같은 요구를 표현만 바꿔 다시 묻지 않는다.
+- "A와 B 중 어느 쪽이 먼저인가요, 그 근거는 무엇인가요?"처럼 지나치게 세부적인 비교·양자택일·근거 요구형 질문은 만들지 않는다. 실제 발표 청중이 자연스럽게 떠올릴 수준의 질문이어야 한다.
 """.strip()
 
         try:
@@ -233,7 +253,6 @@ class QuestionService:
 
             follow_up_needed = (
                 not sufficient
-                and score < 70
                 and follow_up_count < max_follow_ups
             )
 

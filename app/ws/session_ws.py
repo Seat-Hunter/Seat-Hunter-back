@@ -125,6 +125,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
 
     answer_buffer: list[str] = []
     follow_up_count: int = 0
+    follow_up_history: list[dict] = []
 
     answer_timer_task: asyncio.Task | None = None
     accept_timeout_task: asyncio.Task | None = None
@@ -138,8 +139,6 @@ async def session_websocket(websocket: WebSocket, session_id: str):
 
     QUESTION_ACCEPT_TIMEOUT_SEC = 20.0
     MAX_FOLLOW_UPS = 2
-
-    ANSWER_SILENCE_SEC = 3.0
 
     # 발표 중 실시간 침묵 피드백: 마지막 발화 이후 이 시간(초) 동안 다음 발화가 없으면 안내한다.
     SILENCE_FEEDBACK_SEC = 5.0
@@ -428,20 +427,9 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         except Exception as e:
             print(f"[상태 복귀 에러] {e}")
 
-    async def start_answer_timer():
-        nonlocal answer_timer_task
-
-        if answer_timer_task and not answer_timer_task.done():
-            answer_timer_task.cancel()
-
-        answer_timer_task = asyncio.create_task(evaluate_and_maybe_follow_up())
-
     async def enter_answering_state():
         """
         답변 상태로 진입한다.
-
-        여기서 바로 평가 타이머를 시작하지 않는다.
-        실제 답변 final transcript가 들어온 뒤 start_answer_timer()를 시작한다.
         """
         nonlocal answer_started
         nonlocal answer_started_at
@@ -549,6 +537,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         nonlocal current_question_id
         nonlocal parent_question_id
         nonlocal follow_up_count
+        nonlocal follow_up_history
         nonlocal answer_buffer
         nonlocal accept_timeout_task
         nonlocal last_llm_interrupt_check_at
@@ -697,6 +686,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
 
             current_question = question_result.question_text
             follow_up_count = 0
+            follow_up_history = []
             answer_buffer.clear()
 
             q_id = f"q_{len(previous_questions)}"
@@ -798,211 +788,9 @@ async def session_websocket(websocket: WebSocket, session_id: str):
             "answer_so_far": " ".join(answer_buffer),
         })
 
-        await start_answer_timer()
-
     # ============================================================
     # 답변 평가 + 꼬리질문 판단
     # ============================================================
-
-    async def evaluate_and_maybe_follow_up():
-        nonlocal current_question
-        nonlocal current_question_id
-        nonlocal parent_question_id
-        nonlocal answer_buffer
-        nonlocal follow_up_count
-        nonlocal answer_timer_task
-        nonlocal answer_started
-        nonlocal answer_started_at
-        nonlocal last_answer_at
-        nonlocal accept_timeout_task
-
-        try:
-            await asyncio.sleep(ANSWER_SILENCE_SEC)
-        except asyncio.CancelledError:
-            return
-
-        if not answer_started:
-            print("[답변 평가 보류] 아직 답변이 시작되지 않았습니다.")
-            return
-
-        now = time.time()
-
-        if last_answer_at is not None:
-            silence_after_last_answer = now - last_answer_at
-
-            if silence_after_last_answer < ANSWER_SILENCE_SEC:
-                print("[답변 평가 보류] 아직 답변이 이어지는 중입니다.")
-                await start_answer_timer()
-                return
-
-        user_answer = " ".join(answer_buffer).strip()
-
-        log_answer_received(
-            current_question_id,
-            current_question,
-            user_answer,
-        )
-
-        if not user_answer:
-            print("[답변 평가 보류] 누적 답변이 비어 있습니다.")
-            return
-
-        if not current_question or not current_question_id:
-            log_follow_up_finished("현재 질문이 없음")
-            await resume_presentation()
-            return
-
-        try:
-            recent_transcript_raw = await sr.get_recent_transcript()
-            recent_context_list = normalize_transcript_list(recent_transcript_raw)
-
-            eval_result = await question_service.evaluate_answer_ai(
-                AnswerEvaluationInput(
-                    question_id=current_question_id,
-                    parent_question_id=parent_question_id,
-                    question_text=current_question,
-                    user_answer=user_answer,
-                    current_topic=None,
-                    recent_context=recent_context_list,
-                    pressure_level="medium",
-                    is_follow_up=follow_up_count > 0,
-                    follow_up_count=follow_up_count,
-                    max_follow_ups=MAX_FOLLOW_UPS,
-                )
-            )
-        except Exception as e:
-            print(f"[답변 평가 에러] {e} → 발표로 복귀합니다.")
-            log_follow_up_finished("답변 평가 실패")
-            await resume_presentation()
-            return
-
-        log_answer_evaluation(
-            current_question_id,
-            current_question,
-            user_answer,
-            eval_result,
-        )
-
-        try:
-            _log_raw = await sr.r.get(f"session:{session_id}:answer_log")
-            _answer_log = json.loads(_log_raw) if _log_raw else []
-
-            _answer_log.append({
-                "question_id": current_question_id,
-                "parent_question_id": parent_question_id,
-                "question_text": current_question,
-                "user_answer": user_answer,
-                "answer_score": eval_result.answer_score,
-                "evaluation_reason": eval_result.evaluation_reason,
-                "audience_reaction": eval_result.audience_reaction,
-                "follow_up_needed": eval_result.follow_up_needed,
-                "follow_up_question": eval_result.follow_up_question,
-                "is_follow_up": follow_up_count > 0,
-                "follow_up_count": follow_up_count,
-                "max_follow_ups": MAX_FOLLOW_UPS,
-                "created_at": time.time(),
-            })
-
-            await sr.r.set(
-                f"session:{session_id}:answer_log",
-                json.dumps(_answer_log, ensure_ascii=False),
-            )
-
-        except Exception as e:
-            print(f"[답변 로그 저장 에러] {e}")
-
-        await safe_broadcast({
-            "type": "answer_evaluated",
-            "question_id": current_question_id,
-            "parent_question_id": parent_question_id,
-            "question_text": current_question,
-            "user_answer": user_answer,
-            "answer_score": eval_result.answer_score,
-            "evaluation_reason": eval_result.evaluation_reason,
-            "audience_reaction": eval_result.audience_reaction,
-            "follow_up_needed": eval_result.follow_up_needed,
-            "follow_up_question": eval_result.follow_up_question,
-            "is_follow_up": follow_up_count > 0,
-            "follow_up_count": follow_up_count,
-            "max_follow_ups": MAX_FOLLOW_UPS,
-        })
-
-        await safe_broadcast({
-            "type": "audience_reaction",
-            "reaction": eval_result.audience_reaction,
-            "answer_score": eval_result.answer_score,
-            "evaluation_reason": eval_result.evaluation_reason,
-            "follow_up_needed": eval_result.follow_up_needed,
-            "follow_up_count": follow_up_count,
-            "max_follow_ups": MAX_FOLLOW_UPS,
-        })
-
-        answer_buffer.clear()
-        answer_started = False
-        answer_started_at = None
-        last_answer_at = None
-
-        await cancel_answer_timers()
-
-        if follow_up_count >= MAX_FOLLOW_UPS:
-            log_follow_up_finished("최대 꼬리질문 횟수 도달")
-            await resume_presentation()
-            return
-
-        if not eval_result.follow_up_needed or not eval_result.follow_up_question:
-            log_follow_up_finished("꼬리질문 불필요")
-            await resume_presentation()
-            return
-
-        follow_up_count += 1
-        current_question = eval_result.follow_up_question
-        current_question_id = f"{parent_question_id}_follow_up_{follow_up_count}"
-
-        answer_buffer.clear()
-        answer_started = False
-        answer_started_at = None
-        last_answer_at = None
-
-        log_follow_up(current_question_id, current_question)
-
-        try:
-            _log_raw = await sr.r.get(f"session:{session_id}:interrupt_log")
-            _log = json.loads(_log_raw) if _log_raw else []
-
-            _log.append({
-                "question_id": current_question_id,
-                "parent_question_id": parent_question_id,
-                "question_text": eval_result.follow_up_question,
-                "reason": "follow_up",
-                "is_follow_up": True,
-                "follow_up_count": follow_up_count,
-                "max_follow_ups": MAX_FOLLOW_UPS,
-                "created_at": time.time(),
-            })
-
-            await sr.r.set(
-                f"session:{session_id}:interrupt_log",
-                json.dumps(_log, ensure_ascii=False),
-            )
-
-        except Exception as e:
-            print(f"[꼬리질문 로그 저장 에러] {e}")
-
-        await safe_broadcast({
-            "type": "interrupt_question",
-            "question_id": current_question_id,
-            "parent_question_id": parent_question_id,
-            "question_text": eval_result.follow_up_question,
-            "is_follow_up": True,
-            "follow_up_count": follow_up_count,
-            "max_follow_ups": MAX_FOLLOW_UPS,
-            "pressure_level": "medium",
-        })
-
-        await cancel_accept_timeout()
-        accept_timeout_task = asyncio.create_task(
-            handle_question_accept_timeout(current_question_id)
-        )
 
     async def evaluate_and_maybe_follow_up_immediate():
         """
@@ -1013,6 +801,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         nonlocal parent_question_id
         nonlocal answer_buffer
         nonlocal follow_up_count
+        nonlocal follow_up_history
         nonlocal answer_started
         nonlocal answer_started_at
         nonlocal last_answer_at
@@ -1047,12 +836,18 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                     is_follow_up=follow_up_count > 0,
                     follow_up_count=follow_up_count,
                     max_follow_ups=MAX_FOLLOW_UPS,
+                    qa_history=list(follow_up_history),
                 )
             )
         except Exception as e:
             print(f"[즉시 평가 에러] {e}")
             await resume_presentation()
             return
+
+        follow_up_history.append({
+            "question": current_question,
+            "answer": user_answer,
+        })
 
         log_answer_evaluation(
             current_question_id,
@@ -1272,6 +1067,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                 if manual_question_text:
                     current_question = manual_question_text
                     follow_up_count = 0
+                    follow_up_history = []
                     answer_buffer.clear()
 
                     q_id = f"manual_{int(time.time() * 1000)}"

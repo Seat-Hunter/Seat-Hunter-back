@@ -50,6 +50,7 @@ class AnswerEvaluationInput(BaseModel):
     - is_follow_up: 꼬리질문 여부
     - follow_up_count: 현재 꼬리질문 회차
     - max_follow_ups: 최대 꼬리질문 횟수
+    - qa_history: 이 질문 체인(같은 부모 질문)에서 지금까지 나온 질문/답변 기록
     """
     question_id: Optional[str] = None
     parent_question_id: Optional[str] = None
@@ -64,6 +65,7 @@ class AnswerEvaluationInput(BaseModel):
     is_follow_up: bool = False
     follow_up_count: int = 0
     max_follow_ups: int = 2
+    qa_history: List[dict] = Field(default_factory=list)
 
 
 class AnswerEvaluationResult(BaseModel):
