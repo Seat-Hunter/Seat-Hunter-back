@@ -826,6 +826,23 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         except Exception as e:
             print(f"[question_answers 저장 에러] {e}")
 
+        try:
+            _log_raw = await sr.r.get(f"session:{session_id}:interrupt_log")
+            _log = json.loads(_log_raw) if _log_raw else []
+            for item in _log:
+                if item.get("question_id") == current_question_id:
+                    item["answered"] = True
+                    item["answer_score"] = eval_result.answer_score
+                    item["follow_up_needed"] = eval_result.follow_up_needed
+                    item["audience_reaction"] = eval_result.audience_reaction
+                    break
+            await sr.r.set(
+                f"session:{session_id}:interrupt_log",
+                json.dumps(_log, ensure_ascii=False),
+            )
+        except Exception as e:
+            print(f"[인터럽트 답변 로그 업데이트 에러] {e}")
+
         await safe_broadcast({
             "type": "answer_evaluated",
             "question_id": current_question_id,

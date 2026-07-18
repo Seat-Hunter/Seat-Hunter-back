@@ -12,6 +12,7 @@ from app.schemas.report import (
     UserPatternInput,
     SpeechMetricsSnapshot,
     AnswerEvaluationLogItem,
+    InterruptLogItem,
 )
 
 
@@ -144,7 +145,20 @@ class SessionService:
                 for item in answer_log
             ]
 
+            interrupt_log = [
+                InterruptLogItem(
+                    question_text=item.get("question_text", ""),
+                    reason=item.get("reason", ""),
+                    interrupt_type=item.get("interrupt_type"),
+                    answered=item.get("answered", False),
+                    answer_score=item.get("answer_score"),
+                    follow_up_count=item.get("follow_up_count", 0),
+                )
+                for item in interrupt_list
+            ]
+
             report_input = ReportGenerationInput(
+                interrupt_log=interrupt_log,
                 speech_metrics=[snapshot],
                 recovery_metrics=RecoveryMetricsInput(
                     wpm_recovery_speed_score=wpm_recovery,
