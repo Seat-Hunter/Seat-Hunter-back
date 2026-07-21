@@ -399,6 +399,51 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         except Exception as e:
             print(f"[ANSWERING 상태 전환 에러] {e}")
 
+    async def update_interrupt_log_entry(
+        *,
+        question_id: str | None,
+        answered: bool | None = None,
+        answer_score: float | None = None,
+        follow_up_count_value: int | None = None,
+    ):
+        """
+        꼬리질문은 독립 인터럽트가 아니라 부모 질문 흐름에 속하므로
+        interrupt_log의 부모 질문 항목을 기준으로 답변/꼬리질문 수를 갱신한다.
+        """
+        if not question_id:
+            return
+
+        try:
+            _log_raw = await sr.r.get(f"session:{session_id}:interrupt_log")
+            _log = json.loads(_log_raw) if _log_raw else []
+
+            updated = False
+            for item in _log:
+                if item.get("question_id") != question_id:
+                    continue
+
+                if answered is not None:
+                    item["answered"] = answered
+                if answer_score is not None:
+                    item["answer_score"] = answer_score
+                if follow_up_count_value is not None:
+                    previous_count = int(item.get("follow_up_count", 0) or 0)
+                    item["follow_up_count"] = max(previous_count, follow_up_count_value)
+
+                updated = True
+                break
+
+            if not updated:
+                print(f"[인터럽트 로그 업데이트 생략] 매칭 질문 없음: {question_id}")
+                return
+
+            await sr.r.set(
+                f"session:{session_id}:interrupt_log",
+                json.dumps(_log, ensure_ascii=False),
+            )
+        except Exception as e:
+            print(f"[인터럽트 로그 업데이트 에러] {e}")
+
     # ============================================================
     # TTS 생성 + 실패 fallback
     # ============================================================
@@ -826,22 +871,12 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         except Exception as e:
             print(f"[question_answers 저장 에러] {e}")
 
-        try:
-            _log_raw = await sr.r.get(f"session:{session_id}:interrupt_log")
-            _log = json.loads(_log_raw) if _log_raw else []
-            for item in _log:
-                if item.get("question_id") == current_question_id:
-                    item["answered"] = True
-                    item["answer_score"] = eval_result.answer_score
-                    item["follow_up_needed"] = eval_result.follow_up_needed
-                    item["audience_reaction"] = eval_result.audience_reaction
-                    break
-            await sr.r.set(
-                f"session:{session_id}:interrupt_log",
-                json.dumps(_log, ensure_ascii=False),
-            )
-        except Exception as e:
-            print(f"[인터럽트 답변 로그 업데이트 에러] {e}")
+        await update_interrupt_log_entry(
+            question_id=parent_question_id or current_question_id,
+            answered=True,
+            answer_score=eval_result.answer_score,
+            follow_up_count_value=follow_up_count,
+        )
 
         await safe_broadcast({
             "type": "answer_evaluated",
@@ -889,6 +924,11 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         follow_up_count += 1
         current_question = eval_result.follow_up_question
         current_question_id = f"{parent_question_id}_follow_up_{follow_up_count}"
+
+        await update_interrupt_log_entry(
+            question_id=parent_question_id,
+            follow_up_count_value=follow_up_count,
+        )
 
         answer_buffer.clear()
         answer_started = False
