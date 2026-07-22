@@ -826,6 +826,31 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         except Exception as e:
             print(f"[question_answers 저장 에러] {e}")
 
+        try:
+            _alog_raw = await sr.r.get(f"session:{session_id}:answer_log")
+            _alog = json.loads(_alog_raw) if _alog_raw else []
+
+            _alog.append({
+                "question_id": current_question_id,
+                "parent_question_id": parent_question_id,
+                "question_text": current_question,
+                "user_answer": user_answer,
+                "answer_score": eval_result.answer_score,
+                "evaluation_reason": eval_result.evaluation_reason,
+                "audience_reaction": eval_result.audience_reaction,
+                "follow_up_needed": eval_result.follow_up_needed,
+                "is_follow_up": follow_up_count > 0,
+                "follow_up_count": follow_up_count,
+                "created_at": time.time(),
+            })
+
+            await sr.r.set(
+                f"session:{session_id}:answer_log",
+                json.dumps(_alog, ensure_ascii=False),
+            )
+        except Exception as e:
+            print(f"[답변 로그 저장 에러] {e}")
+
         await safe_broadcast({
             "type": "answer_evaluated",
             "question_id": current_question_id,
