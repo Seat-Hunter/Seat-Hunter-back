@@ -51,6 +51,12 @@ class SessionService:
             return
         await sr.set_state(SessionState.FINISHED)
 
+        # 리포트 생성 실패 시 폴백 저장에 쓰는 기본값 (try 초반에 실제 값으로 대체됨)
+        metrics: dict = {}
+        interrupt_list: list = []
+        actual_avg_wpm: float = 0.0
+        silence_count: int = 0
+
         try:
             print(f"[리포트] 생성 시작: {session_id}")
             metrics = await sr.get_metrics()
@@ -68,6 +74,29 @@ class SessionService:
 
             # Supabase scripts 테이블에서 전체 발화 텍스트와 실제 WPM 계산
             sb = get_supabase()
+
+            # Redis answer_log가 비어 있으면 Supabase question_answers에서 조회
+            if not answer_log:
+                try:
+                    answers_res = sb.table("question_answers") \
+                        .select("question_text, answer_text, answer_score, follow_up_needed") \
+                        .eq("session_id", session_id) \
+                        .order("created_at") \
+                        .execute()
+                    answer_log = [
+                        {
+                            "question_text": row.get("question_text", ""),
+                            "user_answer": row.get("answer_text", ""),
+                            "answer_score": row.get("answer_score", 0),
+                            "follow_up_needed": row.get("follow_up_needed", False),
+                            "audience_reaction": "",
+                        }
+                        for row in (answers_res.data or [])
+                        if row.get("answer_text")
+                    ]
+                except Exception as e:
+                    print(f"[리포트] question_answers 조회 실패: {e}")
+
             scripts_res = sb.table("scripts") \
                 .select("transcript, start_ms, end_ms") \
                 .eq("session_id", session_id) \
@@ -191,6 +220,32 @@ class SessionService:
             import traceback
             print(f"[리포트 생성 에러] {type(e).__name__}: {e}")
             traceback.print_exc()
+
+            # LLM 리포트 생성이 실패해도 기본 리포트를 저장한다.
+            # (overall_score가 계속 0/NULL이면 프론트 리포트 조회가 영영 404
+            #  → "피드백을 불러오지 못했습니다"가 되는 것을 방지)
+            try:
+                sb = get_supabase()
+                sb.table("presentation_histories").update({
+                    "avg_wpm":         actual_avg_wpm,
+                    "filler_count":    metrics.get("filler_count_recent", 0),
+                    "silence_count":   silence_count,
+                    "interrupt_count": len(interrupt_list),
+                    "recovery_score":  0,
+                    "overall_score":   50,
+                    "strengths":       json.dumps([], ensure_ascii=False),
+                    "weaknesses":      json.dumps([], ensure_ascii=False),
+                    "feedback":        json.dumps(
+                        ["AI 피드백 생성 중 오류가 발생해 기본 리포트로 대체되었습니다."],
+                        ensure_ascii=False,
+                    ),
+                    "criteria_scores": json.dumps([], ensure_ascii=False),
+                    "curriculum_next": "",
+                    "interrupts":      json.dumps(interrupt_list, ensure_ascii=False),
+                }).eq("session_id", session_id).execute()
+                print(f"[리포트] 기본 리포트로 대체 저장 완료: {session_id}")
+            except Exception as e2:
+                print(f"[리포트] 기본 리포트 저장도 실패: {e2}")
 
         await sr.delete_all()
 

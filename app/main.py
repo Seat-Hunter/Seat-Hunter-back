@@ -1,3 +1,12 @@
+import sys
+
+if sys.version_info < (3, 10):
+    raise RuntimeError(
+        f"Python 3.10 이상이 필요합니다. 현재: {sys.version}\n"
+        "Windows: Seat-Hunter-back\\run.ps1 로 실행하거나\n"
+        r'  & "C:\Users\user\AppData\Local\Programs\Python\Python311\python.exe" -m uvicorn app.main:app --reload'
+    )
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles

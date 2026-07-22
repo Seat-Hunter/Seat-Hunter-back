@@ -136,6 +136,76 @@ async def session_websocket(websocket: WebSocket, session_id: str):
     LLM_INTERRUPT_CHECK_INTERVAL_SEC = 3.0
     LLM_INTERRUPT_MIN_TRANSCRIPT_DELTA = 25
 
+    presentation_segment_index: int = 0
+
+    async def save_presentation_script(text: str, start_ms: int, end_ms: int):
+        nonlocal presentation_segment_index
+
+        try:
+            sb = get_supabase()
+            sb.table("scripts").insert({
+                "session_id": session_id,
+                "transcript": text,
+                "start_ms": start_ms,
+                "end_ms": end_ms,
+                "segment_index": presentation_segment_index,
+            }).execute()
+            presentation_segment_index += 1
+        except Exception as e:
+            print(f"[scripts 저장 에러] {e}")
+
+    async def save_partial_answer_if_any(reason: str = ""):
+        """
+        답변 도중 세션이 끝나면(발표 종료/타이머 만료/WS 끊김)
+        지금까지 수집된 답변을 평가 없이 그대로 저장한다.
+        """
+        user_answer = " ".join(answer_buffer).strip()
+
+        if not user_answer or not current_question or not current_question_id:
+            return
+
+        print(f"[부분 답변 저장] ({reason}) {current_question_id}: {user_answer[:50]}")
+
+        try:
+            sb = get_supabase()
+            sb.table("question_answers").insert({
+                "session_id": session_id,
+                "question_id": current_question_id,
+                "parent_question_id": parent_question_id,
+                "question_text": current_question,
+                "answer_text": user_answer,
+                "answer_score": None,
+                "is_follow_up": follow_up_count > 0,
+                "follow_up_count": follow_up_count,
+            }).execute()
+        except Exception as e:
+            print(f"[부분 답변 question_answers 저장 에러] {e}")
+
+        try:
+            _log_raw = await sr.r.get(f"session:{session_id}:answer_log")
+            _log = json.loads(_log_raw) if _log_raw else []
+            _log.append({
+                "question_id": current_question_id,
+                "parent_question_id": parent_question_id,
+                "question_text": current_question,
+                "user_answer": user_answer,
+                "answer_score": 0,
+                "follow_up_needed": False,
+                "audience_reaction": "",
+                "is_follow_up": follow_up_count > 0,
+                "follow_up_count": follow_up_count,
+                "partial": True,
+                "created_at": time.time(),
+            })
+            await sr.r.set(
+                f"session:{session_id}:answer_log",
+                json.dumps(_log, ensure_ascii=False),
+            )
+        except Exception as e:
+            print(f"[부분 답변 answer_log 저장 에러] {e}")
+
+        answer_buffer.clear()
+
     # ============================================================
     # 안전 종료 유틸
     # ============================================================
@@ -388,10 +458,11 @@ async def session_websocket(websocket: WebSocket, session_id: str):
 
         await safe_set_tts_playing(False)
 
-        answer_buffer.clear()
-        answer_started = False
-        answer_started_at = None
-        last_answer_at = None
+        # 답변 준비(waiting_answer) 중 이미 수집된 조각을 지우지 않는다.
+        if not answer_buffer:
+            answer_started = False
+            answer_started_at = None
+            last_answer_at = None
 
         try:
             await sr.set_state(SessionState.ANSWERING)
@@ -502,13 +573,13 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         if not clean_text:
             return
 
-        # 질문 청취(INTERRUPTED)/답변(ANSWERING) 중에 들어온 STT 조각은
-        # 발표 발화가 아니므로 WPM/필러 분석 및 인터럽트 판단에서 제외한다.
+        # 발표(RUNNING) 중에만 scripts/redis 저장. 그 외 구간 STT는 무시한다.
+        # (질문이 떠 있어도 '질문 받기'를 누르기 전까지는 RUNNING이므로 발표로 계속 저장)
         if await sr.get_tts_playing():
             return
 
         current_state = await sr.get_state()
-        if _is_state(current_state, SessionState.ANSWERING) or _is_state(current_state, SessionState.INTERRUPTED):
+        if not _is_state(current_state, SessionState.RUNNING):
             return
 
         try:
@@ -545,17 +616,17 @@ async def session_websocket(websocket: WebSocket, session_id: str):
 
             current_state = await sr.get_state()
 
-            if _is_state(current_state, SessionState.ANSWERING):
-                return
-
-            if _is_state(current_state, SessionState.INTERRUPTED):
-                return
-
-            if current_question_id:
+            if not _is_state(current_state, SessionState.RUNNING):
                 return
 
             # 발표 transcript 저장은 여기서만 한다.
+            # 질문 대기 중(current_question_id 존재)에도 발표 발화는 계속 저장한다.
             await sr.push_transcript(clean_text)
+            await save_presentation_script(clean_text, start_ms, end_ms)
+
+            # 질문이 이미 떠 있으면 새 인터럽트 판단은 하지 않는다.
+            if current_question_id:
+                return
 
             recent_transcript_raw = await sr.get_recent_transcript()
 
@@ -826,6 +897,28 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         except Exception as e:
             print(f"[question_answers 저장 에러] {e}")
 
+        try:
+            _log_raw = await sr.r.get(f"session:{session_id}:answer_log")
+            _log = json.loads(_log_raw) if _log_raw else []
+            _log.append({
+                "question_id": current_question_id,
+                "parent_question_id": parent_question_id,
+                "question_text": current_question,
+                "user_answer": user_answer,
+                "answer_score": eval_result.answer_score,
+                "follow_up_needed": eval_result.follow_up_needed,
+                "audience_reaction": eval_result.audience_reaction,
+                "is_follow_up": follow_up_count > 0,
+                "follow_up_count": follow_up_count,
+                "created_at": time.time(),
+            })
+            await sr.r.set(
+                f"session:{session_id}:answer_log",
+                json.dumps(_log, ensure_ascii=False),
+            )
+        except Exception as e:
+            print(f"[answer_log 저장 에러] {e}")
+
         await safe_broadcast({
             "type": "answer_evaluated",
             "question_id": current_question_id,
@@ -896,7 +989,15 @@ async def session_websocket(websocket: WebSocket, session_id: str):
             handle_question_accept_timeout(current_question_id)
         )
 
-    stt.set_on_final_transcript(on_final_transcript)
+    async def on_deepgram_final_transcript(text: str, start_ms: int, end_ms: int):
+        current_state = await sr.get_state()
+        if _is_state(current_state, SessionState.ANSWERING):
+            await append_answer_segment(text)
+            return
+
+        await on_final_transcript(text, start_ms, end_ms)
+
+    stt.set_on_final_transcript(on_deepgram_final_transcript)
 
     # ============================================================
     # WebSocket 메시지 루프
@@ -912,6 +1013,10 @@ async def session_websocket(websocket: WebSocket, session_id: str):
 
             if msg_type == "audio_chunk":
                 if tts_playing:
+                    continue
+
+                current_state = await sr.get_state()
+                if not _is_state(current_state, SessionState.RUNNING):
                     continue
 
                 audio_b64 = msg.get("audio_base64")
@@ -950,8 +1055,10 @@ async def session_websocket(websocket: WebSocket, session_id: str):
 
                     if is_answer or _is_state(current_state, SessionState.ANSWERING):
                         await append_answer_segment(text)
-                    else:
+                    elif _is_state(current_state, SessionState.RUNNING):
                         await on_final_transcript(text, ts, ts)
+                    else:
+                        print(f"[STT 무시] 비발표 구간 transcript: state={current_state}, text={text[:30]}")
 
                 else:
                     try:
@@ -1009,11 +1116,23 @@ async def session_websocket(websocket: WebSocket, session_id: str):
             elif msg_type == "answer_finished":
                 print(f"[답변 완료 신호] question_id={current_question_id}")
 
+                pending = msg.get("pending_answer_text", "").strip()
+                if pending:
+                    combined = " ".join(answer_buffer).strip()
+                    if pending not in combined:
+                        await append_answer_segment(pending)
+
                 current_state = await sr.get_state()
 
-                if _is_state(current_state, SessionState.ANSWERING):
-                    await cancel_answer_timers()
-                    asyncio.create_task(evaluate_and_maybe_follow_up_immediate())
+                if not _is_state(current_state, SessionState.ANSWERING):
+                    if answer_buffer:
+                        await enter_answering_state()
+                    else:
+                        print("[답변 완료] 답변 없음 — 무시")
+                        continue
+
+                await cancel_answer_timers()
+                asyncio.create_task(evaluate_and_maybe_follow_up_immediate())
 
             elif msg_type == "interrupt_question":
                 manual_question_text = msg.get("question_text", "")
@@ -1053,6 +1172,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
             elif msg_type == "finish_session":
                 print(f"[WS] 세션 종료 요청 수신: {session_id}")
 
+                await save_partial_answer_if_any("finish_session")
                 await cancel_answer_timers()
                 await cancel_accept_timeout()
                 await safe_close_stt("finish_session 수신")
@@ -1111,6 +1231,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         if current_state_name not in [finished_name, cancelled_name, None]:
             print(f"[WS 끊김] 세션 {session_id} 자동 종료")
 
+            await save_partial_answer_if_any("websocket_disconnect")
             await cancel_answer_timers()
             await cancel_accept_timeout()
             await safe_close_stt("WebSocketDisconnect")
