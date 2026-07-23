@@ -122,6 +122,11 @@ async def session_websocket(websocket: WebSocket, session_id: str):
     non_presenting_started_at: float | None = None
     non_presenting_ms_total: float = 0.0
 
+    # 발표 중 직전 final transcript의 종료 시각(ms).
+    # Web Speech는 세그먼트 시작 시각을 안 주므로, 직전 종료 시각을 다음 세그먼트의
+    # 시작 시각으로 써서 실제 발화 간격(침묵 포함)이 duration에 반영되게 한다.
+    last_presentation_final_end_ms: int | None = None
+
     QUESTION_ACCEPT_TIMEOUT_SEC = 20.0
     MAX_FOLLOW_UPS = 2
 
@@ -289,6 +294,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         nonlocal answer_buffer
         nonlocal non_presenting_started_at
         nonlocal non_presenting_ms_total
+        nonlocal last_presentation_final_end_ms
 
         try:
             await asyncio.sleep(QUESTION_ACCEPT_TIMEOUT_SEC)
@@ -331,6 +337,8 @@ async def session_websocket(websocket: WebSocket, session_id: str):
             non_presenting_ms_total += time.time() * 1000 - non_presenting_started_at
             non_presenting_started_at = None
 
+        last_presentation_final_end_ms = None
+
         await safe_set_tts_playing(False)
 
         try:
@@ -350,6 +358,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         nonlocal last_answer_at
         nonlocal non_presenting_started_at
         nonlocal non_presenting_ms_total
+        nonlocal last_presentation_final_end_ms
 
         current_question = None
         current_question_id = None
@@ -364,6 +373,10 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         if non_presenting_started_at is not None:
             non_presenting_ms_total += time.time() * 1000 - non_presenting_started_at
             non_presenting_started_at = None
+
+        # 질문/답변으로 빠져있던 시간이 다음 발표 세그먼트의 duration에
+        # 섞여 들어가지 않도록 리셋 (재개 후 첫 세그먼트는 ts를 시작 시각으로 사용)
+        last_presentation_final_end_ms = None
 
         await cancel_answer_timers()
         await cancel_accept_timeout()
@@ -1033,7 +1046,9 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                     if is_answer or _is_state(current_state, SessionState.ANSWERING):
                         await append_answer_segment(text)
                     else:
-                        await on_final_transcript(text, ts, ts)
+                        start_ms = last_presentation_final_end_ms or ts
+                        await on_final_transcript(text, start_ms, ts)
+                        last_presentation_final_end_ms = ts
 
                 else:
                     try:
