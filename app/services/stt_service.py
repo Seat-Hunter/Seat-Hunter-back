@@ -14,7 +14,6 @@ from deepgram import (
 from app.core.config import settings
 from app.core.redis_client import SessionRedis
 from app.core.websocket_manager import ws_manager
-from app.core.supabase_client import get_supabase
 from app.schemas.ws_message import make_final_transcript, make_partial_transcript
 
 
@@ -171,25 +170,8 @@ class STTAggregator:
         duration_ms = int(result.duration * 1000) if hasattr(result, "duration") else 0
         end_ms = start_ms + duration_ms
 
-        # 중요:
-        # transcript 저장은 session_ws.py의 on_final_transcript()에서만 한다.
-        # 여기서도 push_transcript를 하면 같은 발화가 Redis에 중복 저장될 수 있다.
-        #
-        # await self.sr.push_transcript(text)
-
-        # Supabase scripts 테이블 저장은 유지
-        try:
-            sb = get_supabase()
-            sb.table("scripts").insert({
-                "session_id": self.session_id,
-                "transcript": text,
-                "start_ms": start_ms,
-                "end_ms": end_ms,
-                "segment_index": self._segment_index,
-            }).execute()
-        except Exception as e:
-            print(f"[scripts 저장 에러] {e}")
-
+        # scripts 저장은 session_ws.on_final_transcript()에서만 한다.
+        # (답변/질문 구간 Deepgram 결과가 발표 대본에 섞이지 않도록 상태 검사 후 저장)
         self._segment_index += 1
 
         await ws_manager.broadcast(

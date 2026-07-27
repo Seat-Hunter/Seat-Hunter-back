@@ -127,6 +127,9 @@ async def session_websocket(websocket: WebSocket, session_id: str):
     # 시작 시각으로 써서 실제 발화 간격(침묵 포함)이 duration에 반영되게 한다.
     last_presentation_final_end_ms: int | None = None
 
+    # 발표 대본(scripts) segment_index — Deepgram final은 여기서만 저장
+    presentation_segment_index: int = 0
+
     QUESTION_ACCEPT_TIMEOUT_SEC = 20.0
     MAX_FOLLOW_UPS = 2
 
@@ -140,6 +143,22 @@ async def session_websocket(websocket: WebSocket, session_id: str):
 
     LLM_INTERRUPT_CHECK_INTERVAL_SEC = 3.0
     LLM_INTERRUPT_MIN_TRANSCRIPT_DELTA = 25
+
+    async def save_presentation_script(text: str, start_ms: int, end_ms: int):
+        """발표 구간 Deepgram final만 scripts 테이블에 저장."""
+        nonlocal presentation_segment_index
+        try:
+            sb = get_supabase()
+            sb.table("scripts").insert({
+                "session_id": session_id,
+                "transcript": text,
+                "start_ms": start_ms,
+                "end_ms": end_ms,
+                "segment_index": presentation_segment_index,
+            }).execute()
+            presentation_segment_index += 1
+        except Exception as e:
+            print(f"[scripts 저장 에러] {e}")
 
     # ============================================================
     # 안전 종료 유틸
@@ -561,7 +580,8 @@ async def session_websocket(websocket: WebSocket, session_id: str):
             return
 
         # 질문 청취(INTERRUPTED)/답변(ANSWERING) 중에 들어온 STT 조각은
-        # 발표 발화가 아니므로 WPM/필러 분석 및 인터럽트 판단에서 제외한다.
+        # 발표 발화가 아니므로 scripts 저장·WPM/필러 분석·인터럽트 판단에서 제외한다.
+        # (질문 받기 전 = 아직 RUNNING 이므로 아래 저장이 계속된다)
         if await sr.get_tts_playing():
             return
 
@@ -569,7 +589,13 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         if _is_state(current_state, SessionState.ANSWERING) or _is_state(current_state, SessionState.INTERRUPTED):
             return
 
+        if not _is_state(current_state, SessionState.RUNNING):
+            return
+
         try:
+            # 발표 대본 저장: RUNNING일 때만 (질문 받기 전 포함)
+            await save_presentation_script(clean_text, start_ms, end_ms)
+
             analysis = await speech_analyzer.analyze(SpeechAnalysisInput(
                 text=clean_text,
                 start_ms=start_ms,
@@ -609,10 +635,13 @@ async def session_websocket(websocket: WebSocket, session_id: str):
             if _is_state(current_state, SessionState.INTERRUPTED):
                 return
 
+            # 질문이 이미 떠 있어도 발표 대본은 위에서 저장됨.
+            # 새 인터럽트 판단만 막는다.
             if current_question_id:
+                await sr.push_transcript(clean_text)
                 return
 
-            # 발표 transcript 저장은 여기서만 한다.
+            # Redis 최근 transcript는 인터럽트 판단용
             await sr.push_transcript(clean_text)
 
             recent_transcript_raw = await sr.get_recent_transcript()
@@ -1009,6 +1038,12 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                 if tts_playing:
                     continue
 
+                # 질문 받기 전(RUNNING)에만 Deepgram으로 보냄.
+                # accept 후 INTERRUPTED / ANSWERING 구간 말은 scripts에 안 넣음.
+                current_state = await sr.get_state()
+                if not _is_state(current_state, SessionState.RUNNING):
+                    continue
+
                 audio_b64 = msg.get("audio_base64")
 
                 if not audio_b64:
@@ -1043,12 +1078,14 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                     ts = msg.get("timestamp_ms", int(time.time() * 1000))
                     current_state = await sr.get_state()
 
+                    # Web Speech는 답변 전용. 발표 대본은 Deepgram(audio_chunk)만 담당.
                     if is_answer or _is_state(current_state, SessionState.ANSWERING):
                         await append_answer_segment(text)
                     else:
-                        start_ms = last_presentation_final_end_ms or ts
-                        await on_final_transcript(text, start_ms, ts)
-                        last_presentation_final_end_ms = ts
+                        print(
+                            f"[STT 무시] 발표용 Web Speech는 사용하지 않음: "
+                            f"state={current_state}, text={text[:30]}"
+                        )
 
                 else:
                     try:
@@ -1106,11 +1143,21 @@ async def session_websocket(websocket: WebSocket, session_id: str):
             elif msg_type == "answer_finished":
                 print(f"[답변 완료 신호] question_id={current_question_id}")
 
+                pending = msg.get("pending_answer_text", "").strip()
+                if pending:
+                    await append_answer_segment(pending)
+
                 current_state = await sr.get_state()
 
-                if _is_state(current_state, SessionState.ANSWERING):
-                    await cancel_answer_timers()
-                    asyncio.create_task(evaluate_and_maybe_follow_up_immediate())
+                if not _is_state(current_state, SessionState.ANSWERING):
+                    # 프론트가 answer_started 전에 finish를 보낸 경우 대비
+                    if answer_buffer or pending:
+                        await enter_answering_state()
+                    else:
+                        continue
+
+                await cancel_answer_timers()
+                asyncio.create_task(evaluate_and_maybe_follow_up_immediate())
 
             elif msg_type == "interrupt_question":
                 manual_question_text = msg.get("question_text", "")
