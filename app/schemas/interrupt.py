@@ -54,6 +54,7 @@ class InterruptDecisionInput(BaseModel):
 
     presentation_type: str = "academic"
     audience_type: str = "professor"
+    audience_count: Optional[int] = None
 
     previous_questions: List[str] = Field(default_factory=list)
 

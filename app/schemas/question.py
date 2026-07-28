@@ -19,6 +19,7 @@ class QuestionGenerationInput(BaseModel):
     current_topic: Optional[str] = None
     audience_type: str
     presentation_type: str
+    audience_count: Optional[int] = None
     pressure_level: str = "medium"
     previous_questions: List[str] = Field(default_factory=list)
 

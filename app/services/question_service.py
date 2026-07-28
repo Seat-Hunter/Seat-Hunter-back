@@ -99,6 +99,7 @@ class QuestionService:
 - 현재 발표 주제: {data.current_topic or "알 수 없음"}
 - 발표 유형: {data.presentation_type}
 - 청중 유형: {data.audience_type}
+- 청중 인원: {f"{data.audience_count}명" if data.audience_count else "알 수 없음"}
 - 압박 강도: {data.pressure_level}
 
 이전 질문:

@@ -102,6 +102,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
     session_pressure_level = session_config.get("pressure_level") or "medium"
     session_interrupt_enabled = session_config.get("interrupt_enabled", True)
     session_topic = session_config.get("title") or None
+    session_audience_count = session_config.get("audience_count")
 
     # LLM 기반 인터럽트 판단 서비스
     interrupt_service = InterruptService()
@@ -711,6 +712,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                 pressure_level=session_pressure_level,
                 presentation_type=session_presentation_type,
                 audience_type=session_audience_type,
+                audience_count=session_audience_count,
                 previous_questions=previous_questions,
             )
 
@@ -727,6 +729,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                         recent_context=recent_context_list,
                         audience_type=session_audience_type,
                         presentation_type=session_presentation_type,
+                        audience_count=session_audience_count,
                         pressure_level=session_pressure_level,
                         previous_questions=previous_questions,
                     )

@@ -214,6 +214,9 @@ class InterruptService:
 [청중 유형]
 {data.audience_type}
 
+[청중 인원]
+{f"{data.audience_count}명" if data.audience_count else "알 수 없음"}
+
 [압박 수준]
 {data.pressure_level}
 
