@@ -16,7 +16,6 @@ class SessionState(str, Enum):
     CANCELLED = "CANCELLED"
 
 class SessionCreateRequest(BaseModel):
-    user_id: int
     presentation_type: str
     audience_type: str
     audience_count: Optional[int] = None

@@ -18,7 +18,7 @@ from app.schemas.report import (
 
 class SessionService:
 
-    async def create_session(self, config: dict) -> str:
+    async def create_session(self, config: dict, user_id: int) -> str:
         session_id = f"sess_{uuid.uuid4().hex[:12]}"
         sr = SessionRedis(session_id)
         await sr.set_state(SessionState.READY)
@@ -29,7 +29,7 @@ class SessionService:
         # presentation_histories에 초기 행 INSERT
         sb = get_supabase()
         sb.table("presentation_histories").insert({
-            "user_id":            config.get("user_id", 1),
+            "user_id":            user_id,
             "session_id":         session_id,
             "title":              config.get("title"),
             "presentation_type":  config.get("presentation_type"),

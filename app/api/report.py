@@ -1,8 +1,9 @@
 import asyncio
 import json
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from app.core.supabase_client import get_supabase
+from app.api.deps import get_current_user_id
 
 router = APIRouter()
 
@@ -101,10 +102,10 @@ async def get_session_scripts(session_id: str):
 
 
 @router.get(
-    "/users/{user_id}/sessions",
-    summary="유저 세션 목록 조회",
+    "/users/me/sessions",
+    summary="내 세션 목록 조회",
 )
-async def get_user_sessions(user_id: int):
+async def get_user_sessions(user_id: int = Depends(get_current_user_id)):
     sb = get_supabase()
     res = sb.table("presentation_histories") \
         .select("id, session_id, title, presentation_type, audience_type, duration_seconds, overall_score, created_at") \
@@ -112,6 +113,23 @@ async def get_user_sessions(user_id: int):
         .order("created_at", desc=True) \
         .execute()
     return res.data
+
+
+@router.delete(
+    "/users/me/sessions",
+    summary="내 세션 전체 삭제",
+)
+async def delete_all_user_sessions(user_id: int = Depends(get_current_user_id)):
+    sb = get_supabase()
+    res = sb.table("presentation_histories").select("session_id").eq("user_id", user_id).execute()
+    session_ids = [row["session_id"] for row in (res.data or [])]
+
+    if session_ids:
+        sb.table("scripts").delete().in_("session_id", session_ids).execute()
+        sb.table("question_answers").delete().in_("session_id", session_ids).execute()
+        sb.table("presentation_histories").delete().eq("user_id", user_id).execute()
+
+    return {"deleted_count": len(session_ids)}
 
 
 @router.get(
