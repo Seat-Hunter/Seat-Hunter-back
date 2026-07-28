@@ -93,6 +93,15 @@ async def session_websocket(websocket: WebSocket, session_id: str):
     stt = STTAggregator(session_id)
     speech_analyzer = SpeechAnalysisService()
 
+    # 세션 생성 시 저장된 실제 설정값 (하드코딩 대체용)
+    config_raw = await sr.r.get(f"session:{session_id}:config")
+    session_config = json.loads(config_raw) if config_raw else {}
+
+    session_presentation_type = session_config.get("presentation_type") or "academic"
+    session_audience_type = session_config.get("audience_type") or "professor"
+    session_pressure_level = session_config.get("pressure_level") or "medium"
+    session_interrupt_enabled = session_config.get("interrupt_enabled", True)
+
     # LLM 기반 인터럽트 판단 서비스
     interrupt_service = InterruptService()
 
@@ -635,6 +644,10 @@ async def session_websocket(websocket: WebSocket, session_id: str):
             if _is_state(current_state, SessionState.INTERRUPTED):
                 return
 
+            # 세션 설정에서 돌발 질문을 껐다면 인터럽트 판단 자체를 하지 않는다.
+            if not session_interrupt_enabled:
+                return
+
             # 질문이 이미 떠 있어도 발표 대본은 위에서 저장됨.
             # 새 인터럽트 판단만 막는다.
             if current_question_id:
@@ -692,11 +705,11 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                     slide_context=None,
                     script_context=None,
                 ),
-                interrupt_enabled=True,
+                interrupt_enabled=session_interrupt_enabled,
                 cooldown_remaining_ms=int(cooldown_remaining),
-                pressure_level="medium",
-                presentation_type="academic",
-                audience_type="professor",
+                pressure_level=session_pressure_level,
+                presentation_type=session_presentation_type,
+                audience_type=session_audience_type,
                 previous_questions=previous_questions,
             )
 
@@ -711,9 +724,9 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                     QuestionGenerationInput(
                         current_topic=None,
                         recent_context=recent_context_list,
-                        audience_type="professor",
-                        presentation_type="academic",
-                        pressure_level="medium",
+                        audience_type=session_audience_type,
+                        presentation_type=session_presentation_type,
+                        pressure_level=session_pressure_level,
                         previous_questions=previous_questions,
                     )
                 )
@@ -767,7 +780,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                 "question_id": q_id,
                 "parent_question_id": parent_question_id,
                 "question_text": question_result.question_text,
-                "pressure_level": "medium",
+                "pressure_level": session_pressure_level,
                 "is_follow_up": False,
                 "follow_up_count": follow_up_count,
                 "max_follow_ups": MAX_FOLLOW_UPS,
@@ -874,7 +887,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                     user_answer=user_answer,
                     current_topic=None,
                     recent_context=recent_context_list,
-                    pressure_level="medium",
+                    pressure_level=session_pressure_level,
                     is_follow_up=follow_up_count > 0,
                     follow_up_count=follow_up_count,
                     max_follow_ups=MAX_FOLLOW_UPS,
@@ -1012,7 +1025,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
             "is_follow_up": True,
             "follow_up_count": follow_up_count,
             "max_follow_ups": MAX_FOLLOW_UPS,
-            "pressure_level": "medium",
+            "pressure_level": session_pressure_level,
         })
 
         await cancel_accept_timeout()
@@ -1107,7 +1120,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                     await send_question_tts_or_fallback(
                         question_id=current_question_id,
                         question_text=current_question,
-                        pressure_level="medium",
+                        pressure_level=session_pressure_level,
                         is_follow_up=follow_up_count > 0,
                         follow_up_count_value=follow_up_count,
                     )
@@ -1161,7 +1174,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
 
             elif msg_type == "interrupt_question":
                 manual_question_text = msg.get("question_text", "")
-                pressure_level = msg.get("pressure_level", "medium")
+                pressure_level = msg.get("pressure_level", session_pressure_level)
 
                 if manual_question_text:
                     current_question = manual_question_text
