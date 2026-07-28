@@ -101,6 +101,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
     session_audience_type = session_config.get("audience_type") or "professor"
     session_pressure_level = session_config.get("pressure_level") or "medium"
     session_interrupt_enabled = session_config.get("interrupt_enabled", True)
+    session_topic = session_config.get("title") or None
 
     # LLM 기반 인터럽트 판단 서비스
     interrupt_service = InterruptService()
@@ -697,7 +698,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                     stress_score=analysis.stress_score,
                 ),
                 context_state=ContextStateInput(
-                    current_topic=None,
+                    current_topic=session_topic,
                     drift_score=0.0,
                     topic_shift_detected=False,
                     latest_utterance=clean_text,
@@ -722,7 +723,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
             try:
                 question_result = await question_service.generate_question_ai(
                     QuestionGenerationInput(
-                        current_topic=None,
+                        current_topic=session_topic,
                         recent_context=recent_context_list,
                         audience_type=session_audience_type,
                         presentation_type=session_presentation_type,
@@ -885,7 +886,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                     parent_question_id=parent_question_id,
                     question_text=current_question,
                     user_answer=user_answer,
-                    current_topic=None,
+                    current_topic=session_topic,
                     recent_context=recent_context_list,
                     pressure_level=session_pressure_level,
                     is_follow_up=follow_up_count > 0,

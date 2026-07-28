@@ -22,6 +22,7 @@ class SessionCreateRequest(BaseModel):
     pressure_level: PressureLevel = PressureLevel.medium
     duration_seconds: int = 300
     interrupt_enabled: bool = True
+    title: Optional[str] = None
     script_text: Optional[str] = None
     slide_texts: Optional[List[str]] = None
 
