@@ -411,9 +411,6 @@ class QuestionService:
         if audience_type == "professor":
             return "reason_probe"
 
-        if presentation_type == "job_interview":
-            return "experience_probe"
-
         return "clarification"
 
     def _select_question_difficulty(self, pressure_level: str) -> str:

@@ -10,8 +10,8 @@ class QuestionGenerationInput(BaseModel):
 
     - recent_context: 최근 발화 문맥
     - current_topic: 현재 발표 주제
-    - audience_type: interviewer / professor / investor
-    - presentation_type: job_interview / contest / presentation
+    - audience_type: professor / investor / boss / general
+    - presentation_type: academic / school / meeting
     - pressure_level: low / medium / high
     - previous_questions: 이전에 했던 질문들
     """
