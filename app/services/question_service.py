@@ -24,6 +24,10 @@ from app.schemas.question import (
     AnswerEvaluationInput,
     AnswerEvaluationResult,
 )
+from app.services.prompt_scenarios import (
+    build_scenario_block,
+    PRESSURE_LEVEL_EVAL_SCENARIOS,
+)
 
 
 try:
@@ -101,6 +105,9 @@ class QuestionService:
 - 청중 유형: {data.audience_type}
 - 청중 인원: {f"{data.audience_count}명" if data.audience_count else "알 수 없음"}
 - 압박 강도: {data.pressure_level}
+
+상황별 지침:
+{build_scenario_block(data.presentation_type, data.audience_type, data.pressure_level, data.audience_count)}
 
 이전 질문:
 {previous_questions}
@@ -188,6 +195,9 @@ class QuestionService:
 - 현재 꼬리질문 횟수: {follow_up_count}
 - 최대 꼬리질문 횟수: {max_follow_ups}
 - 꼬리질문 생성 가능 여부: {can_generate_follow_up}
+
+[압박 강도에 따른 판단 기준]
+- {PRESSURE_LEVEL_EVAL_SCENARIOS.get(data.pressure_level, PRESSURE_LEVEL_EVAL_SCENARIOS["medium"])}
 
 평가 기준:
 - 질문에 직접 답했는가?

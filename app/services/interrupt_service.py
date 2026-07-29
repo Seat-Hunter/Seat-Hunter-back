@@ -22,6 +22,7 @@ from app.schemas.interrupt import (
     InterruptDecisionInput,
     InterruptDecisionResult,
 )
+from app.services.prompt_scenarios import build_scenario_block
 
 
 class InterruptService:
@@ -219,6 +220,9 @@ class InterruptService:
 
 [압박 수준]
 {data.pressure_level}
+
+[상황별 지침]
+{build_scenario_block(data.presentation_type, data.audience_type, data.pressure_level, data.audience_count)}
 
 [방금 들은 발화]
 {context.latest_utterance}
