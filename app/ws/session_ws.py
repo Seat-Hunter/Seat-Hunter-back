@@ -103,6 +103,9 @@ async def session_websocket(websocket: WebSocket, session_id: str):
     session_interrupt_enabled = session_config.get("interrupt_enabled", True)
     session_topic = session_config.get("title") or None
     session_audience_count = session_config.get("audience_count")
+    session_script_text = (session_config.get("script_text") or "").strip() or None
+    if not session_topic and session_script_text:
+        session_topic = session_script_text[:120]
 
     # LLM 기반 인터럽트 판단 서비스
     interrupt_service = InterruptService()
@@ -189,6 +192,34 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         finally:
             deepgram_started = False
 
+    async def ensure_deepgram_for_presentation(reason: str = "presentation_resume"):
+        """
+        발표 구간용 Deepgram을 살아 있게 만든다.
+        질문/답변 중 연결이 죽었으면 강제 재연결한다.
+        """
+        nonlocal deepgram_started
+
+        try:
+            if deepgram_started and await stt.is_connected():
+                return
+
+            if deepgram_started:
+                try:
+                    await stt.force_reconnect(reason=reason)
+                except Exception as e:
+                    print(f"[STT 재연결 실패] {e}")
+                    deepgram_started = False
+                    await stt.start_deepgram()
+                    deepgram_started = True
+            else:
+                await stt.start_deepgram()
+                deepgram_started = True
+
+            print(f"[STT] Deepgram 준비 완료: {reason}")
+        except Exception as e:
+            deepgram_started = False
+            print(f"[STT Deepgram 준비 실패] {reason}: {e}")
+
     async def safe_broadcast(payload: dict):
         if websocket_closed:
             return
@@ -253,6 +284,8 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         print(f"질문 내용: {question_text}")
         print(f"사용자 답변: {user_answer}")
         print(f"점수: {eval_result.answer_score}")
+        print(f"답변 유형: {getattr(eval_result, 'answer_category', None)}")
+        print(f"피드백: {getattr(eval_result, 'topic_feedback', None)}")
         print(f"평가 이유: {eval_result.evaluation_reason}")
         print(f"청중 반응: {eval_result.audience_reaction}")
         print(f"꼬리질문 필요 여부: {eval_result.follow_up_needed}")
@@ -419,6 +452,9 @@ async def session_websocket(websocket: WebSocket, session_id: str):
             await safe_broadcast(make_session_state(SessionState.RUNNING))
         except Exception as e:
             print(f"[상태 복귀 에러] {e}")
+
+        # 질문/답변 동안 Deepgram keepalive가 죽었을 수 있으므로 발표 재개 시 재연결
+        await ensure_deepgram_for_presentation("resume_presentation")
 
     async def enter_answering_state():
         """
@@ -917,7 +953,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
 
         try:
             sb = get_supabase()
-            sb.table("question_answers").insert({
+            answer_row = {
                 "session_id": session_id,
                 "question_id": current_question_id,
                 "parent_question_id": parent_question_id,
@@ -926,7 +962,18 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                 "answer_score": eval_result.answer_score,
                 "is_follow_up": follow_up_count > 0,
                 "follow_up_count": follow_up_count,
-            }).execute()
+                "answer_category": eval_result.answer_category,
+                "topic_alignment": eval_result.topic_alignment,
+                "topic_feedback": eval_result.topic_feedback,
+            }
+            try:
+                sb.table("question_answers").insert(answer_row).execute()
+            except Exception:
+                # 확장 컬럼이 아직 없는 DB에서도 답변 자체는 저장되게 폴백
+                answer_row.pop("answer_category", None)
+                answer_row.pop("topic_alignment", None)
+                answer_row.pop("topic_feedback", None)
+                sb.table("question_answers").insert(answer_row).execute()
         except Exception as e:
             print(f"[question_answers 저장 에러] {e}")
 
@@ -950,6 +997,9 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                 "evaluation_reason": eval_result.evaluation_reason,
                 "audience_reaction": eval_result.audience_reaction,
                 "follow_up_needed": eval_result.follow_up_needed,
+                "answer_category": eval_result.answer_category,
+                "topic_alignment": eval_result.topic_alignment,
+                "topic_feedback": eval_result.topic_feedback,
                 "is_follow_up": follow_up_count > 0,
                 "follow_up_count": follow_up_count,
                 "created_at": time.time(),
@@ -973,6 +1023,9 @@ async def session_websocket(websocket: WebSocket, session_id: str):
             "audience_reaction": eval_result.audience_reaction,
             "follow_up_needed": eval_result.follow_up_needed,
             "follow_up_question": eval_result.follow_up_question,
+            "answer_category": eval_result.answer_category,
+            "topic_alignment": eval_result.topic_alignment,
+            "topic_feedback": eval_result.topic_feedback,
             "is_follow_up": follow_up_count > 0,
             "follow_up_count": follow_up_count,
             "max_follow_ups": MAX_FOLLOW_UPS,
@@ -983,6 +1036,9 @@ async def session_websocket(websocket: WebSocket, session_id: str):
             "reaction": eval_result.audience_reaction,
             "answer_score": eval_result.answer_score,
             "evaluation_reason": eval_result.evaluation_reason,
+            "answer_category": eval_result.answer_category,
+            "topic_alignment": eval_result.topic_alignment,
+            "topic_feedback": eval_result.topic_feedback,
             "follow_up_needed": eval_result.follow_up_needed,
             "follow_up_count": follow_up_count,
             "max_follow_ups": MAX_FOLLOW_UPS,
@@ -1052,11 +1108,12 @@ async def session_websocket(websocket: WebSocket, session_id: str):
             tts_playing = await sr.get_tts_playing()
 
             if msg_type == "audio_chunk":
+                # 발표 중(RUNNING) Deepgram만 사용.
+                # 질문 TTS / 답변(ANSWERING) 구간 audio_chunk는 받지 않는다.
+                # (답변은 Web Speech partial_transcript 경로)
                 if tts_playing:
                     continue
 
-                # 질문 받기 전(RUNNING)에만 Deepgram으로 보냄.
-                # accept 후 INTERRUPTED / ANSWERING 구간 말은 scripts에 안 넣음.
                 current_state = await sr.get_state()
                 if not _is_state(current_state, SessionState.RUNNING):
                     continue
@@ -1067,11 +1124,9 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                     print("[STT] audio_base64 없음 → audio_chunk 생략")
                     continue
 
-                if not deepgram_started:
+                if not deepgram_started or not await stt.is_connected():
                     try:
-                        print("[STT] 첫 audio_chunk 수신 → Deepgram 시작")
-                        await stt.start_deepgram()
-                        deepgram_started = True
+                        await ensure_deepgram_for_presentation("audio_chunk")
                     except Exception as e:
                         print(f"[STT 시작 에러] {e}")
                         await safe_close_stt("Deepgram 시작 실패")
@@ -1081,8 +1136,14 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                     await stt.send_audio(audio_b64)
                 except Exception as e:
                     print(f"[STT audio 전송 에러] {e}")
-                    await safe_close_stt("audio 전송 실패")
-                    continue
+                    deepgram_started = False
+                    try:
+                        await ensure_deepgram_for_presentation("audio_send_retry")
+                        await stt.send_audio(audio_b64)
+                    except Exception as e2:
+                        print(f"[STT audio 재전송 실패] {e2}")
+                        await safe_close_stt("audio 전송 실패")
+                        continue
 
             elif msg_type == "partial_transcript":
                 if tts_playing:

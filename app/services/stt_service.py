@@ -37,6 +37,29 @@ class STTAggregator:
         self._on_final_callback = None
         self._on_partial_callback = None
 
+    async def is_connected(self) -> bool:
+        return bool(self._dg_connection and self._connected and not self._closed)
+
+    async def ensure_connected(self):
+        """
+        Deepgram이 살아 있지 않으면 다시 연결한다.
+        질문/답변 구간 동안 오디오가 끊겨 keepalive가 죽어도
+        발표 재개 후 바로 복구할 수 있게 한다.
+        """
+        if await self.is_connected():
+            return
+        await self.start_deepgram()
+
+    async def force_reconnect(self, reason: str = "force_reconnect"):
+        """
+        기존 연결을 정리한 뒤 새로 연결한다.
+        발표 재개 직후 죽은 소켓을 붙잡고 있지 않도록 사용한다.
+        """
+        print(f"[Deepgram] 강제 재연결: {reason}")
+        await self._finish_deepgram_connection(reason=reason, mark_closed=False)
+        self._closed = False
+        await self.start_deepgram()
+
     async def start_deepgram(self):
         """
         Deepgram live transcription 연결 시작.

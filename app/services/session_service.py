@@ -141,6 +141,9 @@ class SessionService:
                     answer_score=item.get("answer_score", 0),
                     follow_up_needed=item.get("follow_up_needed", False),
                     audience_reaction=item.get("audience_reaction", ""),
+                    answer_category=item.get("answer_category"),
+                    topic_alignment=item.get("topic_alignment"),
+                    topic_feedback=item.get("topic_feedback"),
                 )
                 for item in answer_log
             ]
