@@ -21,6 +21,7 @@ from app.schemas.report import (
     CriterionScoreItem,
     UserPatternOutput,
 )
+from app.services.prompt_scenarios import build_scenario_block, AUDIENCE_TYPE_CONTENT_CHECKS
 
 try:
     if settings.gemini_api_key:
@@ -96,7 +97,11 @@ class ReportService:
         """
         LLM 기준별 평가 결과를 overall_score / response_score / 강점·개선 포인트·실천 방법 / 기준별 점수로 변환한다.
         """
-        weights = get_weights(has_qa=has_qa)
+        weights = get_weights(
+            has_qa=has_qa,
+            audience_type=data.audience_type,
+            pressure_level=data.pressure_level,
+        )
         total_weight = sum(weights.get(c.criterion_id, 0.0) for c in eval_result.criteria)
         if total_weight > 0:
             overall_score = sum(
@@ -233,6 +238,30 @@ logical_structure / message_clarity 평가에 반영하세요. 발화 내용이 
   "발표가 거의 수행되지 않아 해당 기준을 신뢰성 있게 평가할 수 없습니다"를 반영하고 0~30점 사이의 낮은 점수를 부여하세요.
   action_item에는 "마이크를 켜고 실제로 말하면서 연습하세요"를 포함하세요."""
 
+        env_section = ""
+        if any([data.presentation_type, data.audience_type, data.pressure_level, data.audience_count, data.topic]):
+            scenario_block = build_scenario_block(
+                data.presentation_type, data.audience_type, data.pressure_level, data.audience_count,
+            )
+            topic_line = f"- 발표 주제: {data.topic}\n" if data.topic else ""
+            content_check = AUDIENCE_TYPE_CONTENT_CHECKS.get(data.audience_type)
+            content_check_line = (
+                f"\n- 이 청중 유형에서 특히 확인해야 할 내용 요소: {content_check}\n"
+                "  발표 내용(실제 발화·대본)에 이 요소들이 실제로 등장했는지를 logical_structure와 message_clarity의\n"
+                "  evidence/diagnosis에 구체적으로 언급하세요 (등장했다면 어디서, 빠졌다면 무엇이 빠졌는지)."
+                if content_check else ""
+            )
+            env_section = f"""
+## 발표 환경
+{topic_line}{scenario_block}
+{content_check_line}
+
+위 발표 환경을 반드시 고려하여 평가하세요. qa_response뿐 아니라 logical_structure/message_clarity 평가에도
+이 환경 맥락(청중이 무엇을 궁금해할지, 압박 강도)을 구체적으로 반영하세요. professor라면 근거의 타당성을,
+압박 강도가 high라면 답변의 디테일 부족에 더 엄격한 기준을 적용하세요. evidence/diagnosis는 이 발표의
+실제 주제·내용을 짚어 서술하고, 다른 발표에도 그대로 적용될 법한 뻔한 문장은 피하세요.
+"""
+
         return f"""당신은 발표 코칭 전문가입니다. 아래 [평가 기준]에 따라 발표를 분석하고,
 기준별로 점수(0~100)와 evidence(근거), diagnosis(진단), action_item(실천 항목)을 작성하세요.
 
@@ -259,6 +288,7 @@ WPM, 필러 단어, 침묵 구간을 바탕으로 발화가 매끄럽게 전달�
 - 50~69: 말속도 또는 필러/침묵 중 한 가지 이상이 뚜렷한 문제
 - 0~49: 여러 지표가 동시에 문제
 {qa_criterion_block}
+{env_section}
 ## 세션 데이터
 - 평균 WPM: {summary.avg_wpm} (적정: 100~160)
 - 필러 단어: {summary.filler_count}회 (5회 이상이면 유창성 저하)

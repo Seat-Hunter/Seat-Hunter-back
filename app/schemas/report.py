@@ -75,6 +75,11 @@ class ReportGenerationInput(BaseModel):
     user_pattern: UserPatternInput = Field(default_factory=UserPatternInput)
     transcript_text: Optional[str] = None
     script_text: Optional[str] = None
+    presentation_type: Optional[str] = None
+    audience_type: Optional[str] = None
+    audience_count: Optional[int] = None
+    pressure_level: Optional[str] = None
+    topic: Optional[str] = None
 
 
 class ReportSummary(BaseModel):
