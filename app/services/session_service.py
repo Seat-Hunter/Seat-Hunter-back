@@ -34,6 +34,8 @@ class SessionService:
             "title":              config.get("title"),
             "presentation_type":  config.get("presentation_type"),
             "audience_type":      config.get("audience_type"),
+            "audience_count":     config.get("audience_count"),
+            "pressure_level":     config.get("pressure_level"),
             "duration_seconds":   config.get("duration_seconds"),
         }).execute()
 
@@ -141,6 +143,9 @@ class SessionService:
                     answer_score=item.get("answer_score", 0),
                     follow_up_needed=item.get("follow_up_needed", False),
                     audience_reaction=item.get("audience_reaction", ""),
+                    answer_category=item.get("answer_category"),
+                    topic_alignment=item.get("topic_alignment"),
+                    topic_feedback=item.get("topic_feedback"),
                 )
                 for item in answer_log
             ]
@@ -169,6 +174,11 @@ class SessionService:
                 answer_evaluation_log=answer_eval_log,
                 transcript_text=transcript_text,
                 script_text=script_text,
+                presentation_type=config.get("presentation_type"),
+                audience_type=config.get("audience_type"),
+                audience_count=config.get("audience_count"),
+                pressure_level=config.get("pressure_level"),
+                topic=config.get("title"),
             )
 
             result = await asyncio.to_thread(ReportService().generate_report, report_input)

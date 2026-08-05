@@ -69,6 +69,16 @@ PRESSURE_LEVEL_SCENARIOS = {
     ),
 }
 
+# 청중 유형별로 발표 "내용" 자체에서 확인해야 할 요소.
+# 평가 프롬프트에서 logical_structure/message_clarity가 이 요소들을 실제로 다뤘는지
+# evidence에 구체적으로 언급하도록 강제하는 데 쓴다 (qa_response에만 환경이 반영되는 것을 막기 위함).
+AUDIENCE_TYPE_CONTENT_CHECKS = {
+    "professor": "선행 연구·근거 자료 언급, 방법론의 타당성 설명, 결과의 한계점 인정 여부",
+    "investor": "시장 규모, 수익 모델, 경쟁 우위, ROI/수익성 지표 언급 여부",
+    "boss": "실행 일정, 필요 리소스, 리스크 및 책임 소재 언급 여부",
+    "general": "전문 용어를 쉬운 말로 풀어 설명했는지, 청중이 왜 관심을 가져야 하는지 설명했는지",
+}
+
 
 PRESSURE_LEVEL_EVAL_SCENARIOS = {
     "low": (

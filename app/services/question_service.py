@@ -299,16 +299,8 @@ class QuestionService:
         )
 
         prompt = f"""
-너는 실시간 발표 Q&A에서 발표자의 답변을 평가하는 청중 평가자다.
-
-목표:
-완벽한 모범답안을 요구하는 것이 아니라,
-이번 질문의 핵심에 대해 현재 Q&A를 자연스럽게 마쳐도 될 만큼
-답변했는지를 판단한다.
-
-꼬리질문은 단순히 더 자세한 답변을 얻기 위해 만드는 것이 아니다.
-답변에서 확인 가능한 중요한 빈틈이 하나 남아 있고,
-그 빈틈을 묻는 것이 실제로 발표 이해에 도움이 될 때만 만든다.
+너는 발표 Q&A 상황에서 발표자의 답변을 평가하는 평가자다.
+먼저 답변 유형(category)을 분류하고, 내용 점수와 유형 점수를 각각 매긴 뒤 피드백을 작성해라.
 
 [이 질문 흐름에서 지금까지 나온 질문/답변]
 {history_text}
@@ -333,125 +325,69 @@ class QuestionService:
 [압박 강도에 따른 판단 가이드]
 - {pressure_eval_scenario}
 
-[평가 방법]
-아래 순서대로 판단한다.
+[답변 유형 category — 반드시 하나만 선택]
+- CORRECT: 질문에 적절하게 답변함
+- PARTIAL: 질문과 관련은 있지만 답변이 일부 부족함
+- DONT_KNOW: "잘 모르겠습니다", "기억나지 않습니다"처럼 질문은 이해했지만 답하지 못함
+- OFF_TOPIC: 질문과 전혀 관련 없는 내용
+- NONSENSE: 의미 없거나 문맥상 이해할 수 없는 답변
 
-1. 이번 질문이 실제로 요구한 핵심이 무엇인지 파악한다.
-2. 이번 답변과 이전 Q&A를 함께 살펴본다.
-3. 질문의 핵심에 직접 응답했는지 판단한다.
-4. 답변의 의미가 청중에게 이해될 만큼 전달됐는지 판단한다.
-5. 질문을 이해하는 데 꼭 필요한 이유, 근거, 예시 또는 조건이
-   실질적으로 빠져 있는지 살펴본다.
-6. 부족한 부분이 있더라도 이미 비슷한 내용을 물었다면
-   같은 요구를 반복하지 않는다.
-7. 꼬리질문이 필요하다면 가장 중요한 빈틈 하나만 선택한다.
+중요 구분:
+- "잘 모르겠습니다" → DONT_KNOW (OFF_TOPIC이 아님)
+- "딸기입니다"처럼 질문과 무관 → OFF_TOPIC
+- 근거/예시가 있어 질문에 답함 → CORRECT
+- 관련은 있으나 근거·설명이 부족 → PARTIAL
 
-[가장 먼저 적용할 종료 조건]
-다음 조건 중 하나에 해당하면 sufficient=true, follow_up=null로 처리한다.
+[점수 — 두 개를 따로 매겨라]
+1) content_score (0~100): 답변의 내용 충실도
+   - 질문에 직접 답했는지, 구체적인지, 이유/예시가 있는지, 발표 맥락과 연결되는지
+2) category_score: category에 맞는 구간 안의 점수
+   - CORRECT: 90~100
+   - PARTIAL: 60~80
+   - DONT_KNOW: 30~50
+   - OFF_TOPIC: 0~20
+   - NONSENSE: 0
 
-- 사용자가 "모르겠다", "잘 모르겠습니다", "모름",
-  "생각해 본 적이 없습니다", "필요 없습니다", "됐습니다",
-  "없습니다" 등으로 더 답할 의사가 없음을 분명히 나타낸 경우
-- 꼬리질문 생성 가능 여부가 false인 경우
-- 질문의 핵심에 이미 답했고 전체적인 의미가 충분히 전달된 경우
-- 부족한 세부 정보가 있더라도 Q&A를 더 이어갈 정도로 중요하지 않은 경우
-- 이전 질문이나 답변에서 해당 요구가 이미 충분히 다뤄진 경우
-- 자연스럽고 유익한 꼬리질문을 만들 수 없는 경우
+반드시 JSON만 출력해라.
+형식:
 
-사용자가 답변을 회피하거나 더 답할 의사가 없다고 표현한 경우:
-- 왜 모르는지 다시 묻지 않는다.
-- 어떤 정보가 있어야 답할 수 있는지 묻지 않는다.
-- 답변을 강제로 유도하지 않는다.
-- Q&A를 종료한다.
+{{
+  "category": "PARTIAL",
+  "content_score": 72,
+  "category_score": 68,
+  "sufficient": true,
+  "follow_up": null,
+  "feedback": "질문과 관련된 답변이었지만 근거나 설명이 부족했습니다."
+}}
 
 [명확화 요청 처리]
 사용자의 답변이 이번 질문에 대한 실제 답변이 아니라,
 다음과 같이 질문의 의미를 다시 확인하는 경우가 있다.
 
-예:
-- "어떤 부분을 말씀하시는 건가요?"
-- "구체적으로 어떤 의미인가요?"
-- "그게 어떤 상황을 말하는 건가요?"
+[feedback]
+- 한국어 한 문장으로, category에 맞는 이유를 설명한다.
+- 예: CORRECT → "질문에 적절한 근거를 제시했습니다."
+- 예: DONT_KNOW → "질문은 이해했지만 답변을 제공하지 못했습니다."
+- 예: OFF_TOPIC → "질문과 관련 없는 내용을 답변했습니다."
+- 예: NONSENSE → "답변의 의미를 이해하기 어려웠습니다."
 
-이 경우:
-- sufficient=false로 판단할 수 있다.
-- 새로운 주제로 넘어가지 않는다.
-- 선택지를 여러 개 나열하지 않는다.
-- 최근 발표 맥락에 실제로 나온 표현이나 사례 하나를 짚는다.
-- 원래 질문의 핵심을 유지한 채 더 쉬운 말로 다시 묻는다.
-- 사용자를 평가하거나 명확화 요청 자체를 문제 삼지 않는다.
+[최우선 예외 — 다른 규칙보다 먼저 확인]
+- DONT_KNOW이거나 "모르겠다/잘 모르겠습니다/모름/글쎄요/생각해본 적 없다/필요 없습니다/됐습니다/없습니다"처럼 답변을 회피하거나 더 답할 의사가 없으면, category=DONT_KNOW, sufficient=true, follow_up=null로 처리한다. 회피 자체를 다시 캐묻지 않는다.
+- 사용자의 답변이 질문(예: "~가 어떤 걸 말씀하시는 건가요")으로 명확화를 요청하는 경우, follow_up에서 새로운 선택지를 나열하거나 그 질문에 직접 답하지 않는다. 대신 [이번 질문]의 핵심은 유지한 채, [최근 발표 맥락]의 실제 사례/표현을 한 가지만 짚어 쉬운 말로 다시 묻는다. 이 경우 category는 PARTIAL로 둘 수 있다.
+- 꼬리질문 생성 가능 여부가 false이면 sufficient=true, follow_up=null로 처리한다.
+- OFF_TOPIC / NONSENSE는 보통 sufficient=true로 두고 follow_up=null로 처리한다. (엉뚱한 답에 꼬리질문으로 붙잡지 않는다)
+- PARTIAL만 필요 시 sufficient=false와 follow_up으로 부족한 부분을 되물을 수 있다.
 
 [sufficient 판단 기준]
-- sufficient는 score와 독립적으로 판단한다.
-- 점수가 낮다는 이유만으로 sufficient=false로 판단하지 않는다.
-- 질문의 핵심 요구에 직접 응답했고 의미가 전달됐다면 true다.
-- 답변이 짧더라도 핵심이 분명하다면 true로 판단할 수 있다.
-- 답변이 길더라도 핵심을 비켜 갔다면 false로 판단할 수 있다.
-- 질문과 일부 관련은 있지만 핵심 요구에 응답하지 않았다면 false를 고려한다.
-- 답변을 이해하기 위해 꼭 필요한 정보가 실질적으로 빠진 경우 false를 고려한다.
-- 압박 강도가 높다는 이유만으로 자동으로 false 처리하지 않는다.
-- 단순히 더 좋은 답변을 받을 수 있다는 이유로 false 처리하지 않는다.
-- 이전 Q&A에서 이미 충족된 요구를 표현만 바꿔 다시 요구하지 않는다.
+- content_score/category_score는 참고 지표이며, sufficient/follow_up 판단의 절대 기준은 아니다.
+- 질문의 핵심에 응답했다면(CORRECT/PARTIAL의 충분 케이스) 디테일 부족만으로 false 처리하지 않는다.
+- 이미 비슷한 요청에 답했다면 같은 요구를 반복하지 말고 true로 처리한다.
+- 더 물을 자연스러운 질문이 없으면 true로 처리한다.
 
-[score 판단 기준]
-score는 0부터 100까지의 참고 점수다.
-
-다음을 종합해 판단한다.
-- 질문에 얼마나 직접적으로 답했는가
-- 답변의 의미가 얼마나 명확한가
-- 발표 맥락과 자연스럽게 연결되는가
-- 필요한 경우 이유, 근거, 예시 또는 조건이 제시됐는가
-- 청중이 답변을 듣고 질문의 핵심을 이해할 수 있는가
-
-주의:
-- 답변이 짧다는 이유만으로 낮은 점수를 주지 않는다.
-- 답변이 길다는 이유만으로 높은 점수를 주지 않는다.
-- 전문 용어를 많이 사용했다는 이유만으로 높은 점수를 주지 않는다.
-- 완벽한 답변이 아니더라도 핵심에 답했다면 적절한 점수를 줄 수 있다.
-
-[꼬리질문 생성 조건]
-다음 조건을 모두 만족할 때만 sufficient=false로 판단하고
-follow_up을 생성한다.
-
-- 원래 질문의 핵심과 직접 관련된 중요한 정보가 빠져 있다.
-- 그 부족함을 사용자의 실제 답변에서 확인할 수 있다.
-- 이전 질문과 같은 요구를 반복하지 않는다.
-- 추가 질문이 발표 내용을 이해하는 데 실질적으로 도움이 된다.
-- 한 문장으로 자연스럽게 물을 수 있다.
-- 꼬리질문 생성 가능 여부가 true다.
-
-[follow_up 작성 규칙]
-- sufficient=false일 때만 작성한다.
-- 한 문장으로 작성한다.
-- 한국어 존댓말을 사용한다.
-- 새로운 주제를 꺼내지 않는다.
-- 답변에서 실제로 부족한 핵심 한 가지만 묻는다.
-- 가능하면 사용자의 답변에 나온 구체적인 표현과 연결한다.
-- 발표 맥락에 없는 내용을 임의로 전제하지 않는다.
-- 이미 했던 질문을 표현만 바꿔 반복하지 않는다.
-- 여러 개의 질문을 한 문장에 결합하지 않는다.
-- 양자택일과 근거 요구를 동시에 묻지 않는다.
-- 과도하게 세부적인 심문형 질문은 피한다.
-- 단순히 "조금 더 자세히 설명해 주세요"라고만 묻기보다,
-  어떤 부분이 필요한지를 자연스럽게 드러낸다.
-- 답변이 충분하다면 억지로 꼬리질문을 만들지 않는다.
-
-[출력 형식]
-반드시 아래 필드를 모두 포함한 JSON object만 출력한다.
-
-{{
-  "score": 0부터 100 사이 숫자,
-  "sufficient": true 또는 false,
-  "follow_up": "꼬리질문 한 문장" 또는 null
-}}
-
-[출력 규칙]
-- JSON object만 출력한다.
-- 코드 블록을 사용하지 않는다.
-- JSON 앞뒤에 설명을 붙이지 않는다.
-- 모든 필드를 반드시 포함한다.
-- sufficient=true이면 follow_up은 반드시 null이다.
-- sufficient=false이면 follow_up은 자연스러운 질문 한 문장이어야 한다.
+[follow_up 작성 규칙 — sufficient=false일 때만]
+- 한 문장, 새 주제 금지, 부족한 부분만 되묻기
+- 이전 질문과 핵심 요구가 같으면 안 된다
+- 지나치게 세부적인 비교·양자택일·근거 요구형은 만들지 않는다
 """.strip()
 
         try:
@@ -473,21 +409,33 @@ follow_up을 생성한다.
 
             parsed = json.loads(text)
 
-            score = float(
-                parsed.get("score", 50)
+            category = self._normalize_answer_category(parsed.get("category"))
+            category_score = self._clamp_score_to_category(
+                category,
+                parsed.get("category_score", parsed.get("score")),
             )
-            score = max(
-                0.0,
-                min(score, 100.0),
+            content_score = self._normalize_content_score(
+                parsed.get("content_score", parsed.get("score")),
+                fallback=category_score,
             )
 
-            sufficient = bool(
-                parsed.get(
-                    "sufficient",
-                    score >= 70,
-                )
-            )
-            follow_up = parsed.get("follow_up")
+            # 최종 답변 점수: 내용 70% + 유형(주제정합성) 30%
+            score = content_score * 0.7 + category_score * 0.3
+            score = max(0.0, min(score, 100.0))
+
+            feedback = parsed.get("feedback") or parsed.get("topic_feedback")
+            if feedback:
+                feedback = str(feedback).strip()
+            else:
+                feedback = self._build_category_feedback(category)
+
+            # DONT_KNOW / OFF_TOPIC / NONSENSE는 꼬리질문으로 붙잡지 않음
+            if category in ("DONT_KNOW", "OFF_TOPIC", "NONSENSE"):
+                sufficient = True
+                follow_up = None
+            else:
+                sufficient = bool(parsed.get("sufficient", category == "CORRECT"))
+                follow_up = parsed.get("follow_up")
 
             follow_up_needed = (
                 not sufficient
@@ -505,13 +453,12 @@ follow_up을 생성한다.
             return AnswerEvaluationResult(
                 answer_score=round(score, 2),
                 follow_up_needed=follow_up_needed,
-                audience_reaction=(
-                    self._select_audience_reaction(
-                        score
-                    )
-                ),
-                evaluation_reason="AI 평가 완료",
+                audience_reaction=self._select_audience_reaction(score),
+                evaluation_reason=feedback,
                 follow_up_question=follow_up,
+                answer_category=category,
+                topic_alignment=round(category_score, 2),
+                topic_feedback=feedback,
             )
 
         except Exception as e:
@@ -567,50 +514,47 @@ follow_up을 생성한다.
         """
         OpenAI 호출 실패 시 사용하는 룰 기반 답변 평가.
         """
-        answer_score = self._calculate_answer_score(
+        category = self._classify_answer_rule(
             question_text=data.question_text,
             user_answer=data.user_answer,
             current_topic=data.current_topic,
             recent_context=data.recent_context,
         )
-
-        follow_up_needed = answer_score < 60
-        audience_reaction = (
-            self._select_audience_reaction(
-                answer_score
-            )
+        content_score = self._calculate_answer_score(
+            question_text=data.question_text,
+            user_answer=data.user_answer,
+            current_topic=data.current_topic,
+            recent_context=data.recent_context,
         )
+        category_score = self._default_score_for_category(category)
+        answer_score = content_score * 0.7 + category_score * 0.3
+        answer_score = max(0.0, min(answer_score, 100.0))
+        feedback = self._build_category_feedback(category)
 
-        evaluation_reason = (
-            self._build_evaluation_reason(
-                answer_score=answer_score,
-                user_answer=data.user_answer,
-            )
-        )
-
-        follow_up_question = None
-
-        if follow_up_needed:
-            follow_up_question = (
-                self._build_follow_up_question(
+        if category in ("DONT_KNOW", "OFF_TOPIC", "NONSENSE"):
+            follow_up_needed = False
+            follow_up_question = None
+        else:
+            follow_up_needed = category == "PARTIAL" and answer_score < 70
+            follow_up_question = None
+            if follow_up_needed:
+                follow_up_question = self._build_follow_up_question(
                     question_text=data.question_text,
                     current_topic=data.current_topic,
                     user_answer=data.user_answer,
-                    pressure_level=data.pressure_level,
+                    pressure_level=data.pressure_level
                 )
-            )
-            follow_up_question = (
-                self._clean_generated_question(
-                    follow_up_question
-                )
-            )
+                follow_up_question = self._clean_generated_question(follow_up_question)
 
         return AnswerEvaluationResult(
             answer_score=round(answer_score, 2),
             follow_up_needed=follow_up_needed,
-            audience_reaction=audience_reaction,
-            evaluation_reason=evaluation_reason,
+            audience_reaction=self._select_audience_reaction(answer_score),
+            evaluation_reason=feedback,
             follow_up_question=follow_up_question,
+            answer_category=category,
+            topic_alignment=round(category_score, 2),
+            topic_feedback=feedback,
         )
 
     def _clean_generated_question(
@@ -886,10 +830,161 @@ follow_up을 생성한다.
 
         return min(score, 100.0)
 
-    def _select_audience_reaction(
+    ANSWER_CATEGORIES = ("CORRECT", "PARTIAL", "DONT_KNOW", "OFF_TOPIC", "NONSENSE")
+
+    CATEGORY_SCORE_RANGES = {
+        "CORRECT": (90.0, 100.0),
+        "PARTIAL": (60.0, 80.0),
+        "DONT_KNOW": (30.0, 50.0),
+        "OFF_TOPIC": (0.0, 20.0),
+        "NONSENSE": (0.0, 0.0),
+    }
+
+    CATEGORY_FEEDBACK = {
+        "CORRECT": "질문에 적절한 근거를 제시했습니다.",
+        "PARTIAL": "질문과 관련된 답변이었지만 근거나 설명이 부족했습니다.",
+        "DONT_KNOW": "질문은 이해했지만 답변을 제공하지 못했습니다.",
+        "OFF_TOPIC": "질문과 관련 없는 내용을 답변했습니다.",
+        "NONSENSE": "답변의 의미를 이해하기 어려웠습니다.",
+    }
+
+    def _normalize_answer_category(self, value) -> str:
+        raw = str(value or "").strip().upper().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "CORRECT": "CORRECT",
+            "PARTIAL": "PARTIAL",
+            "DONT_KNOW": "DONT_KNOW",
+            "DONTKNOW": "DONT_KNOW",
+            "UNKNOWN": "DONT_KNOW",
+            "OFF_TOPIC": "OFF_TOPIC",
+            "OFFTOPIC": "OFF_TOPIC",
+            "NONSENSE": "NONSENSE",
+            "IRRELEVANT": "OFF_TOPIC",
+        }
+        return aliases.get(raw, "PARTIAL")
+
+    def _clamp_score_to_category(self, category: str, score) -> float:
+        low, high = self.CATEGORY_SCORE_RANGES.get(category, (50.0, 70.0))
+        if score is None:
+            return self._default_score_for_category(category)
+        try:
+            value = float(score)
+        except Exception:
+            return self._default_score_for_category(category)
+        return max(low, min(value, high))
+
+    def _normalize_content_score(self, score, fallback: float = 50.0) -> float:
+        if score is None:
+            return max(0.0, min(float(fallback), 100.0))
+        try:
+            value = float(score)
+        except Exception:
+            return max(0.0, min(float(fallback), 100.0))
+        return max(0.0, min(value, 100.0))
+
+    def _default_score_for_category(self, category: str) -> float:
+        low, high = self.CATEGORY_SCORE_RANGES.get(category, (50.0, 70.0))
+        return round((low + high) / 2, 2)
+
+    def _build_category_feedback(self, category: str) -> str:
+        return self.CATEGORY_FEEDBACK.get(category, self.CATEGORY_FEEDBACK["PARTIAL"])
+
+    def _classify_answer_rule(
         self,
-        answer_score: float,
+        question_text: str,
+        user_answer: str,
+        current_topic: str | None,
+        recent_context: List[str],
     ) -> str:
+        answer = (user_answer or "").strip()
+        if not answer:
+            return "NONSENSE"
+
+        lowered = answer.lower()
+        dont_know_markers = [
+            "모르겠", "모름", "글쎄", "생각해본 적 없", "기억 안", "기억나지",
+            "필요 없", "됐습니다", "없습니다", "잘 몰라",
+        ]
+        if any(marker in answer for marker in dont_know_markers):
+            return "DONT_KNOW"
+
+        if len(answer) < 3 or answer in {"...", "?", "ㄱ", "ㄴ", "ㄷ", "ㅋㅋ", "ㅎㅎ"}:
+            return "NONSENSE"
+
+        alignment = self._estimate_topic_alignment(
+            question_text=question_text,
+            user_answer=answer,
+            current_topic=current_topic,
+            recent_context=recent_context,
+        )
+        content = self._calculate_answer_score(
+            question_text=question_text,
+            user_answer=answer,
+            current_topic=current_topic,
+            recent_context=recent_context,
+        )
+
+        if alignment < 25 and content < 35:
+            return "OFF_TOPIC"
+        if content >= 75 and alignment >= 60:
+            return "CORRECT"
+        if alignment >= 40 or content >= 45:
+            return "PARTIAL"
+        return "OFF_TOPIC"
+
+    def _estimate_topic_alignment(
+        self,
+        question_text: str,
+        user_answer: str,
+        current_topic: str | None,
+        recent_context: List[str],
+    ) -> float:
+        """
+        룰 기반 주제 정합성(0~100) 추정.
+        질문/주제/최근 맥락 토큰이 답변에 얼마나 겹치는지 본다.
+        """
+        answer = (user_answer or "").strip()
+        if len(answer) < 4:
+            return 20.0
+
+        score = 40.0
+        anchors: list[str] = []
+
+        for raw in [question_text or "", current_topic or ""]:
+            for token in raw.split():
+                token = token.strip(".,!?()[]\"'“”‘’")
+                if len(token) >= 2:
+                    anchors.append(token)
+
+        for ctx in (recent_context or [])[-2:]:
+            for token in ctx.split():
+                token = token.strip(".,!?()[]\"'“”‘’")
+                if len(token) >= 2:
+                    anchors.append(token)
+
+        if not anchors:
+            return 55.0
+
+        unique_anchors = list(dict.fromkeys(anchors))[:40]
+        hits = sum(1 for token in unique_anchors if token in answer)
+        overlap_ratio = hits / max(len(unique_anchors), 1)
+        score += min(overlap_ratio * 50, 45)
+
+        if current_topic and current_topic in answer:
+            score += 10
+
+        return max(0.0, min(score, 100.0))
+
+    def _build_topic_feedback(self, topic_alignment: float) -> str:
+        if topic_alignment >= 80:
+            return "답변이 질문과 발표 주제에 잘 맞춰져 있습니다."
+        if topic_alignment >= 60:
+            return "대체로 주제에 맞지만, 질문 핵심으로 더 짧게 연결하면 좋습니다."
+        if topic_alignment >= 40:
+            return "답변이 질문·발표 주제에서 다소 벗어났습니다. 핵심부터 말한 뒤 예시를 붙이세요."
+        return "답변이 주제에서 많이 벗어났습니다. 질문 의도에 먼저 직접 답해보세요."
+
+    def _select_audience_reaction(self, answer_score: float) -> str:
         """
         답변 점수 기반 청중 반응 결정.
         """

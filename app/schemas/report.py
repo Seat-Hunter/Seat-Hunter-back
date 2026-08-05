@@ -32,6 +32,9 @@ class AnswerEvaluationLogItem(BaseModel):
     answer_score: float
     follow_up_needed: bool
     audience_reaction: str
+    answer_category: Optional[str] = None
+    topic_alignment: Optional[float] = None
+    topic_feedback: Optional[str] = None
 
 
 class SpeechMetricsSnapshot(BaseModel):
@@ -75,6 +78,11 @@ class ReportGenerationInput(BaseModel):
     user_pattern: UserPatternInput = Field(default_factory=UserPatternInput)
     transcript_text: Optional[str] = None
     script_text: Optional[str] = None
+    presentation_type: Optional[str] = None
+    audience_type: Optional[str] = None
+    audience_count: Optional[int] = None
+    pressure_level: Optional[str] = None
+    topic: Optional[str] = None
 
 
 class ReportSummary(BaseModel):
@@ -87,6 +95,7 @@ class ReportSummary(BaseModel):
     silence_count: int
     interrupt_count: int
     avg_answer_score: float
+    avg_topic_alignment: float = 0.0
 
 
 class UserPatternOutput(BaseModel):

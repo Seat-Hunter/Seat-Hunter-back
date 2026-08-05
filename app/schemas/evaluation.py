@@ -22,6 +22,20 @@ CRITERION_WEIGHTS: dict[str, float] = {
     "qa_response": 0.25,         # 질문 대응력/회복력
 }
 
+# 발표 환경(청중 유형/압박 강도)에 따른 가중치 보정치.
+# has_qa=True일 때만 적용되며, 적용 후 합이 1.00이 되도록 재정규화한다.
+AUDIENCE_TYPE_WEIGHT_BIAS: dict[str, dict[str, float]] = {
+    "investor": {"qa_response": 0.05, "logical_structure": -0.05},
+    "professor": {"logical_structure": 0.05, "qa_response": -0.05},
+    "boss": {"qa_response": 0.05, "delivery_fluency": -0.05},
+    "general": {"message_clarity": 0.05, "logical_structure": -0.05},
+}
+
+PRESSURE_LEVEL_WEIGHT_BIAS: dict[str, dict[str, float]] = {
+    "high": {"qa_response": 0.03},
+    "low": {"qa_response": -0.03},
+}
+
 # 강점 / 개선 포인트를 가르는 기준 점수
 STRENGTH_THRESHOLD = 75
 
@@ -34,21 +48,43 @@ CRITERION_LABELS: dict[str, str] = {
 }
 
 
-def get_weights(has_qa: bool) -> dict[str, float]:
+def get_weights(
+    has_qa: bool,
+    audience_type: str | None = None,
+    pressure_level: str | None = None,
+) -> dict[str, float]:
     """
-    세션에 질의응답이 있었는지에 따라 평가 기준 가중치를 반환한다.
+    세션에 질의응답이 있었는지, 그리고 발표 환경(청중 유형/압박 강도)에 따라
+    평가 기준 가중치를 반환한다.
 
-    - has_qa=True: CRITERION_WEIGHTS 그대로 사용 (4개 기준)
+    - has_qa=True: CRITERION_WEIGHTS를 기준으로 audience_type/pressure_level 보정치를
+      더한 뒤 합이 1.00이 되도록 재정규화한다.
     - has_qa=False: qa_response 가중치(0.25)를 나머지 3개 기준에
-      기존 비율대로 재분배 (logical_structure 0.40 / message_clarity 0.40 / delivery_fluency 0.20)
+      기존 비율대로 재분배한다 (logical_structure 0.40 / message_clarity 0.40 / delivery_fluency 0.20).
+      질의응답 자체가 없으므로 환경 보정은 적용하지 않는다.
     """
-    if has_qa:
+    if not has_qa:
+        qa_weight = CRITERION_WEIGHTS["qa_response"]
+        remaining = {k: v for k, v in CRITERION_WEIGHTS.items() if k != "qa_response"}
+        total = sum(remaining.values())
+        return {k: v + qa_weight * (v / total) for k, v in remaining.items()}
+
+    bias: dict[str, float] = {}
+    for source in (
+        AUDIENCE_TYPE_WEIGHT_BIAS.get(audience_type, {}),
+        PRESSURE_LEVEL_WEIGHT_BIAS.get(pressure_level, {}),
+    ):
+        for criterion, delta in source.items():
+            bias[criterion] = bias.get(criterion, 0.0) + delta
+
+    if not bias:
         return CRITERION_WEIGHTS
 
-    qa_weight = CRITERION_WEIGHTS["qa_response"]
-    remaining = {k: v for k, v in CRITERION_WEIGHTS.items() if k != "qa_response"}
-    total = sum(remaining.values())
-    return {k: v + qa_weight * (v / total) for k, v in remaining.items()}
+    adjusted = {k: max(0.0, v + bias.get(k, 0.0)) for k, v in CRITERION_WEIGHTS.items()}
+    total = sum(adjusted.values())
+    if total <= 0:
+        return CRITERION_WEIGHTS
+    return {k: v / total for k, v in adjusted.items()}
 
 
 class CriterionEvaluation(BaseModel):
