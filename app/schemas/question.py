@@ -73,14 +73,20 @@ class AnswerEvaluationResult(BaseModel):
     """
     사용자 답변 평가 결과
 
-    - answer_score: 0~100 점수
+    - answer_score: 0~100 점수 (내용 70% + 유형/주제정합성 30%)
     - follow_up_needed: 추가 질문 필요 여부
     - audience_reaction: confused / neutral / satisfied / impressed
     - evaluation_reason: 평가 이유
     - follow_up_question: 추가 질문이 필요할 경우 생성되는 질문
+    - answer_category: CORRECT / PARTIAL / DONT_KNOW / OFF_TOPIC / NONSENSE
+    - topic_alignment: 유형(주제정합성) 점수 0~100
+    - topic_feedback: 분류 결과에 따른 한 줄 피드백
     """
     answer_score: float
     follow_up_needed: bool
     audience_reaction: str
     evaluation_reason: str
     follow_up_question: Optional[str] = None
+    answer_category: Optional[str] = None
+    topic_alignment: Optional[float] = None
+    topic_feedback: Optional[str] = None
