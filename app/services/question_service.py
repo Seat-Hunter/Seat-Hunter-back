@@ -1,6 +1,7 @@
 # app/services/question_service.py
 
-# 발표 상황에 맞는 질문 생성, 추가 질문 생성, 사용자 답변 평가를 담당하는 Question Engine 서비스
+# 발표 상황에 맞는 질문 생성, 추가 질문 생성,
+# 사용자 답변 평가를 담당하는 Question Engine 서비스
 #
 # 최소 프롬프팅 버전:
 # - 지금까지 들은 발표 내용만 기반으로 질문 생성
@@ -31,9 +32,15 @@ from app.services.prompt_scenarios import (
 
 
 try:
-    _openai_client = OpenAI(api_key=settings.openai_api_key) if settings.openai_api_key else None
+    _openai_client = (
+        OpenAI(api_key=settings.openai_api_key)
+        if settings.openai_api_key
+        else None
+    )
 except Exception as _e:
-    print(f"[QuestionService OpenAI 초기화 실패] {_e}")
+    print(
+        f"[QuestionService OpenAI 초기화 실패] {_e}"
+    )
     _openai_client = None
 
 
@@ -46,20 +53,25 @@ class QuestionService:
     - 사용자 답변 평가
     - 필요 시 후속 질문 생성
 
-    OpenAI API 연결 실패 또는 API Key 미설정 시 룰 기반 로직으로 폴백한다.
+    OpenAI API 연결 실패 또는 API Key 미설정 시
+    룰 기반 로직으로 폴백한다.
     """
 
-    async def analyze_presentation_style(self, context: str) -> str:
+    async def analyze_presentation_style(
+        self,
+        context: str,
+    ) -> str:
         """
         현재 버전에서는 발표 스타일 분석을 복잡하게 하지 않는다.
-        기존 호출부와의 호환성을 위해 함수는 유지하되 항상 general을 반환한다.
+        기존 호출부와의 호환성을 위해 함수는 유지하되
+        항상 general을 반환한다.
         """
         return "general"
 
     async def generate_question_ai(
         self,
         data: QuestionGenerationInput,
-        presentation_style: str = "general"
+        presentation_style: str = "general",
     ) -> QuestionGenerationResult:
         """
         OpenAI로 최근 발표 맥락 기반 질문 생성.
@@ -69,51 +81,114 @@ class QuestionService:
         - 발표 중간에 끼어들 수 있는 짧은 질문
         - 질문은 1개만 생성
         - 너무 길거나 복합적인 질문은 피함
-        - 발표자가 뒤에서 설명할 수 있는 내용은 단정적으로 공격하지 않음
-        - 첫 질문 후 사용자 답변 평가 후, 답변이 부족하다 판단되면
-        - 사용자 답변 평가 후, 답변이 부족하다 판단되면 꼬리질문 생성
-        - 꼬리질문은 최대 2번까지만 생성 가능
-        - 꼬리질문은 사용자의 답변을 바탕으로 자연스럽게 이어지도록 생성
-        - 모든 질문은 존댓말로 할것
+        - 발표자가 뒤에서 설명할 수 있는 내용은
+          단정적으로 공격하지 않음
+        - 사용자 답변 평가 후 답변이 부족하면
+          꼬리질문 생성
+        - 꼬리질문은 최대 2번까지 생성 가능
+        - 꼬리질문은 사용자의 답변을 바탕으로
+          자연스럽게 이어지도록 생성
+        - 모든 질문은 존댓말로 작성
         """
         if _openai_client is None:
             return self.generate_question(data)
 
-        context = " ".join(data.recent_context[-4:]) if data.recent_context else "발표 내용 없음"
-        previous_questions = "\n".join(f"- {q}" for q in data.previous_questions[-3:]) or "없음"
+        context = (
+            " ".join(data.recent_context[-4:])
+            if data.recent_context
+            else "발표 내용 없음"
+        )
+
+        previous_questions = "\n".join(
+            f"- {question}"
+            for question in data.previous_questions[-3:]
+        ) or "없음"
 
         prompt = f"""
-너는 발표를 듣고 있는 실제 청중이다.
+너는 발표를 실시간으로 듣고 있는 실제 청중이다.
 
-지금까지 들은 발표 내용을 바탕으로, 발표 중간에 자연스럽게 끼어들 수 있는 질문을 1개만 만들어라.
+목표:
+지금까지 실제로 들은 발표 내용에서 가장 자연스럽고 유익한 궁금증 하나를 골라,
+발표 중간에 말로 건넬 수 있는 질문 한 문장으로 만든다.
 
-조건:
-- 질문은 한국어로 작성한다.
-- 한 문장으로만 질문한다.
-- 하나의 궁금증만 묻는다.
-- 지금까지 나온 내용과 직접 관련된 질문이어야 한다.
-- 너무 길거나 복잡하게 만들지 않는다.
-- 발표자가 뒤에서 설명할 수 있는 내용은 단정하지 말고 조심스럽게 묻는다.
-- 질문은 너무 완성된 논문 심사 질문처럼 만들지 말고, 발표를 들으며 바로 떠오른 궁금증처럼 작성한다.
-- 실제 사람이 말하듯 자연스러운 말투로 작성한다.
-- 이전 질문과 비슷한 질문은 피한다.
-- 말머리, 번호, 설명 없이 질문 문장만 출력한다.
+좋은 질문은 단순히 어려운 질문이 아니라,
+현재 발표 내용을 더 잘 이해하거나 중요한 지점을 확인하는 데 도움이 되는 질문이다.
 
-참고 정보:
-- 현재 발표 주제: {data.current_topic or "알 수 없음"}
+질문을 만드는 과정:
+1. 최근 발표 흐름에서 질문의 근거가 되는 구체적인 표현, 주장, 결과,
+   방법, 사례 또는 연결 지점을 찾는다.
+2. 그중 현재 청중의 이해에 가장 도움이 되는 궁금증 하나를 선택한다.
+3. 발표자가 실제로 말하지 않은 내용을 임의로 가정하지 않는다.
+4. 발표자가 바로 뒤에서 설명할 가능성이 높은 내용은
+   이미 빠진 정보라고 단정하지 않는다.
+5. 이전 질문과 핵심 요구가 겹치는지 확인한다.
+6. 선택한 궁금증을 실제 사람이 말할 만한 자연스러운 질문으로 표현한다.
+
+상황별 지침 적용 방법:
+- 상황별 지침은 질문의 관점, 깊이, 어조를 조정하는 가이드다.
+- 상황별 지침의 모든 요소를 하나의 질문에 억지로 포함하지 않는다.
+- 교수 청중이라고 항상 한계점을 묻거나,
+  투자자 청중이라고 항상 시장 규모를 묻지는 않는다.
+- 현재 발표 내용과 가장 자연스럽게 연결되는 관점 하나만 선택한다.
+- 압박 강도는 질문의 깊이와 직접성에 반영한다.
+- 압박 강도가 높더라도 공격적인 표현, 억지 반박,
+  근거 없는 의심이나 트집 잡는 질문은 만들지 않는다.
+
+질문 선택 기준:
+- 이미 충분히 설명된 내용은 다시 묻지 않는다.
+- 너무 넓어서 어떤 답을 해야 할지 모호한 질문은 피한다.
+- 발표 내용의 핵심 이해와 관계없는 사소한 질문은 피한다.
+- 구체적으로 물을 수 있다면
+  "조금 더 설명해 주세요" 같은 포괄적인 질문보다
+  무엇이 궁금한지를 직접 묻는다.
+- 단순히 질문을 생성하기 위해 의미 없는 빈틈을 만들지 않는다.
+- 여러 궁금증이 있더라도 가장 가치 있는 질문 하나만 선택한다.
+- 이전 질문을 단어만 바꿔 반복하지 않는다.
+
+말투:
+- 실제 발표 현장의 청중처럼 자연스럽게 작성한다.
+- 한국어 존댓말을 사용한다.
+- 정중하지만 지나치게 격식적이거나 기계적으로 표현하지 않는다.
+- 발표자를 공격하거나 잘못을 단정하는 표현은 피한다.
+- 발표자가 뒤에서 설명할 수도 있는 내용은
+  "혹시", "이 부분은", "말씀하신 내용에서"처럼 자연스럽게 묻는다.
+- 지나치게 완성된 논문 심사 문장처럼 만들지 않는다.
+
+출력 규칙:
+- 질문 한 문장만 출력한다.
+- 하나의 핵심 궁금증만 묻는다.
+- 여러 질문을 쉼표나 접속사로 결합하지 않는다.
+- 질문과 근거 요구를 한꺼번에 여러 개 묻지 않는다.
+- 발표 내용에 없는 사실을 전제로 삼지 않는다.
+- 말머리, 번호, 역할명, 해설을 출력하지 않는다.
+- 따옴표로 감싸지 않는다.
+- 질문 이외의 설명을 출력하지 않는다.
+
+[현재 발표 주제]
+{data.current_topic or "알 수 없음"}
+
+[세션 설정]
 - 발표 유형: {data.presentation_type}
 - 청중 유형: {data.audience_type}
 - 청중 인원: {f"{data.audience_count}명" if data.audience_count else "알 수 없음"}
 - 압박 강도: {data.pressure_level}
 
-상황별 지침:
-{build_scenario_block(data.presentation_type, data.audience_type, data.pressure_level, data.audience_count)}
+[상황별 지침]
+{build_scenario_block(
+    data.presentation_type,
+    data.audience_type,
+    data.pressure_level,
+    data.audience_count,
+)}
 
-이전 질문:
+[이전 질문]
 {previous_questions}
 
-지금까지 들은 발표 내용:
+[지금까지 들은 발표 내용]
 {context}
+
+위 발표 내용에서 실제로 근거를 찾을 수 있는,
+가장 자연스럽고 유익한 질문 한 문장만 출력해라.
 """.strip()
 
         try:
@@ -123,33 +198,62 @@ class QuestionService:
                 input=prompt,
             )
 
-            question_text = result.output_text.strip().splitlines()[0]
-            question_text = self._clean_generated_question(question_text)
+            question_text = (
+                result.output_text
+                .strip()
+                .splitlines()[0]
+            )
+            question_text = self._clean_generated_question(
+                question_text
+            )
 
             if not question_text:
                 return self.generate_question(data)
 
             return QuestionGenerationResult(
                 question_text=question_text,
-                question_difficulty=self._select_question_difficulty(data.pressure_level),
+                question_difficulty=(
+                    self._select_question_difficulty(
+                        data.pressure_level
+                    )
+                ),
                 question_type="ai_generated",
             )
 
         except Exception as e:
-            print(f"[OpenAI 질문 생성 실패] {e} — 룰 기반 폴백")
+            print(
+                f"[OpenAI 질문 생성 실패] {e} "
+                "— 룰 기반 폴백"
+            )
             return self.generate_question(data)
 
-    async def evaluate_answer_ai(self, data: AnswerEvaluationInput) -> AnswerEvaluationResult:
+    async def evaluate_answer_ai(
+        self,
+        data: AnswerEvaluationInput,
+    ) -> AnswerEvaluationResult:
         """
-        OpenAI로 사용자 답변 평가 및 필요 시 꼬리질문 생성.
+        OpenAI로 사용자 답변 평가 및
+        필요 시 꼬리질문 생성.
         """
         if _openai_client is None:
             return self.evaluate_answer(data)
 
-        recent_context = " ".join(data.recent_context[-2:]) if data.recent_context else "없음"
+        recent_context = (
+            " ".join(data.recent_context[-2:])
+            if data.recent_context
+            else "없음"
+        )
 
-        follow_up_count = getattr(data, "follow_up_count", 0)
-        max_follow_ups = getattr(data, "max_follow_ups", 2)
+        follow_up_count = getattr(
+            data,
+            "follow_up_count",
+            0,
+        )
+        max_follow_ups = getattr(
+            data,
+            "max_follow_ups",
+            2,
+        )
 
         try:
             follow_up_count = int(follow_up_count)
@@ -161,16 +265,38 @@ class QuestionService:
         except Exception:
             max_follow_ups = 2
 
-        can_generate_follow_up = follow_up_count < max_follow_ups
+        can_generate_follow_up = (
+            follow_up_count < max_follow_ups
+        )
 
-        qa_history = getattr(data, "qa_history", None) or []
+        qa_history = (
+            getattr(data, "qa_history", None)
+            or []
+        )
+
         if qa_history:
             history_text = "\n".join(
-                f"{i + 1}) Q: {item.get('question', '')}\n   A: {item.get('answer', '')}"
-                for i, item in enumerate(qa_history)
+                (
+                    f"{index + 1}) "
+                    f"Q: {item.get('question', '')}\n"
+                    f"   A: {item.get('answer', '')}"
+                )
+                for index, item in enumerate(qa_history)
             )
         else:
-            history_text = "없음 (이번이 이 질문 흐름의 첫 평가)"
+            history_text = (
+                "없음 "
+                "(이번이 이 질문 흐름의 첫 평가)"
+            )
+
+        pressure_eval_scenario = (
+            PRESSURE_LEVEL_EVAL_SCENARIOS.get(
+                data.pressure_level,
+                PRESSURE_LEVEL_EVAL_SCENARIOS[
+                    "medium"
+                ],
+            )
+        )
 
         prompt = f"""
 너는 발표 Q&A 상황에서 발표자의 답변을 평가하는 평가자다.
@@ -196,8 +322,8 @@ class QuestionService:
 - 최대 꼬리질문 횟수: {max_follow_ups}
 - 꼬리질문 생성 가능 여부: {can_generate_follow_up}
 
-[압박 강도에 따른 판단 기준]
-- {PRESSURE_LEVEL_EVAL_SCENARIOS.get(data.pressure_level, PRESSURE_LEVEL_EVAL_SCENARIOS["medium"])}
+[압박 강도에 따른 판단 가이드]
+- {pressure_eval_scenario}
 
 [답변 유형 category — 반드시 하나만 선택]
 - CORRECT: 질문에 적절하게 답변함
@@ -234,7 +360,9 @@ class QuestionService:
   "feedback": "질문과 관련된 답변이었지만 근거나 설명이 부족했습니다."
 }}
 
-규칙:
+[명확화 요청 처리]
+사용자의 답변이 이번 질문에 대한 실제 답변이 아니라,
+다음과 같이 질문의 의미를 다시 확인하는 경우가 있다.
 
 [feedback]
 - 한국어 한 문장으로, category에 맞는 이유를 설명한다.
@@ -272,7 +400,12 @@ class QuestionService:
             text = result.output_text.strip()
 
             if text.startswith("```"):
-                text = text.replace("```json", "").replace("```", "").strip()
+                text = (
+                    text
+                    .replace("```json", "")
+                    .replace("```", "")
+                    .strip()
+                )
 
             parsed = json.loads(text)
 
@@ -313,7 +446,9 @@ class QuestionService:
                 follow_up = None
 
             if follow_up:
-                follow_up = self._clean_generated_question(str(follow_up))
+                follow_up = self._clean_generated_question(
+                    str(follow_up)
+                )
 
             return AnswerEvaluationResult(
                 answer_score=round(score, 2),
@@ -327,12 +462,15 @@ class QuestionService:
             )
 
         except Exception as e:
-            print(f"[OpenAI 답변 평가 실패] {e} — 룰 기반 폴백")
+            print(
+                f"[OpenAI 답변 평가 실패] {e} "
+                "— 룰 기반 폴백"
+            )
             return self.evaluate_answer(data)
 
     def generate_question(
         self,
-        data: QuestionGenerationInput
+        data: QuestionGenerationInput,
     ) -> QuestionGenerationResult:
         """
         OpenAI 호출 실패 시 사용하는 룰 기반 질문 생성.
@@ -340,11 +478,13 @@ class QuestionService:
         question_type = self._select_question_type(
             audience_type=data.audience_type,
             presentation_type=data.presentation_type,
-            pressure_level=data.pressure_level
+            pressure_level=data.pressure_level,
         )
 
-        question_difficulty = self._select_question_difficulty(
-            pressure_level=data.pressure_level
+        question_difficulty = (
+            self._select_question_difficulty(
+                pressure_level=data.pressure_level,
+            )
         )
 
         question_text = self._build_question_text(
@@ -354,20 +494,22 @@ class QuestionService:
             presentation_type=data.presentation_type,
             pressure_level=data.pressure_level,
             previous_questions=data.previous_questions,
-            question_type=question_type
+            question_type=question_type,
         )
 
-        question_text = self._clean_generated_question(question_text)
+        question_text = self._clean_generated_question(
+            question_text
+        )
 
         return QuestionGenerationResult(
             question_text=question_text,
             question_difficulty=question_difficulty,
-            question_type=question_type
+            question_type=question_type,
         )
 
     def evaluate_answer(
         self,
-        data: AnswerEvaluationInput
+        data: AnswerEvaluationInput,
     ) -> AnswerEvaluationResult:
         """
         OpenAI 호출 실패 시 사용하는 룰 기반 답변 평가.
@@ -415,9 +557,13 @@ class QuestionService:
             topic_feedback=feedback,
         )
 
-    def _clean_generated_question(self, question: str) -> str:
+    def _clean_generated_question(
+        self,
+        question: str,
+    ) -> str:
         """
         생성된 질문 문장 정리.
+
         - 따옴표 제거
         - 번호 제거
         - 말머리 제거
@@ -427,10 +573,19 @@ class QuestionService:
             return ""
 
         question = question.strip()
-        question = question.strip('"').strip("'").strip()
+        question = (
+            question
+            .strip('"')
+            .strip("'")
+            .strip()
+        )
         question = question.lstrip("- ").strip()
 
-        question = re.sub(r"^\d+[\.\)]\s*", "", question).strip()
+        question = re.sub(
+            r"^\d+[\.\)]\s*",
+            "",
+            question,
+        ).strip()
 
         prefixes = [
             "질문:",
@@ -445,13 +600,24 @@ class QuestionService:
 
         for prefix in prefixes:
             if question.startswith(prefix):
-                question = question[len(prefix):].strip()
+                question = question[
+                    len(prefix):
+                ].strip()
 
-        question = question.splitlines()[0].strip()
+        question = (
+            question
+            .splitlines()[0]
+            .strip()
+        )
 
-        if question and not question.endswith("?") and not question.endswith("？"):
+        if (
+            question
+            and not question.endswith("?")
+            and not question.endswith("？")
+        ):
             if question.endswith("."):
                 question = question[:-1].strip()
+
             question += "?"
 
         return question
@@ -460,11 +626,13 @@ class QuestionService:
         self,
         audience_type: str,
         presentation_type: str,
-        pressure_level: str
+        pressure_level: str,
     ) -> str:
         """
         질문 유형 결정.
-        기본 버전에서는 너무 세분화하지 않고 간단하게만 분기한다.
+
+        기본 버전에서는 너무 세분화하지 않고
+        간단하게만 분기한다.
         """
         if pressure_level == "high":
             return "natural_challenge"
@@ -477,7 +645,10 @@ class QuestionService:
 
         return "clarification"
 
-    def _select_question_difficulty(self, pressure_level: str) -> str:
+    def _select_question_difficulty(
+        self,
+        pressure_level: str,
+    ) -> str:
         """
         압박 강도에 따른 질문 난이도 결정.
         """
@@ -497,52 +668,95 @@ class QuestionService:
         presentation_type: str,
         pressure_level: str,
         previous_questions: List[str],
-        question_type: str
+        question_type: str,
     ) -> str:
         """
         룰 기반 질문 문장 생성.
-        OpenAI가 실패했을 때 최소한 자연스러운 질문을 반환한다.
-        """
-        topic = current_topic or "방금 설명한 내용"
 
-        latest_context = recent_context[-1] if recent_context else topic
+        OpenAI가 실패했을 때 최소한
+        자연스러운 질문을 반환한다.
+        """
+        topic = (
+            current_topic
+            or "방금 설명한 내용"
+        )
+
+        latest_context = (
+            recent_context[-1]
+            if recent_context
+            else topic
+        )
         latest_context = latest_context.strip()
 
-        short_context = self._make_short_context(latest_context, topic)
+        short_context = self._make_short_context(
+            latest_context,
+            topic,
+        )
 
         if question_type == "experience_probe":
-            candidate = f"그러면 이 부분은 실제 경험에서는 어떻게 적용해 보셨나요?"
+            candidate = (
+                "그러면 이 부분은 실제 경험에서는 "
+                "어떻게 적용해 보셨나요?"
+            )
 
         elif question_type == "reason_probe":
-            candidate = f"이 부분에서 그렇게 판단한 이유를 조금 더 설명해 주실 수 있나요?"
+            candidate = (
+                "이 부분에서 그렇게 판단한 이유를 "
+                "조금 더 설명해 주실 수 있나요?"
+            )
 
         elif question_type == "use_case":
-            candidate = f"그러면 이 내용이 실제 사용자에게 가장 도움이 되는 상황은 언제인가요?"
+            candidate = (
+                "그러면 이 내용이 실제 사용자에게 "
+                "가장 도움이 되는 상황은 언제인가요?"
+            )
 
         elif question_type == "natural_challenge":
-            candidate = f"혹시 그 부분을 뒷받침할 만한 근거가 하나 더 있을까요?"
+            candidate = (
+                "혹시 그 부분을 뒷받침할 만한 "
+                "근거가 하나 더 있을까요?"
+            )
 
         else:
-            candidate = f"방금 말씀하신 {short_context} 부분을 조금 더 설명해 주실 수 있나요?"
+            candidate = (
+                f"방금 말씀하신 {short_context} 부분을 "
+                "조금 더 설명해 주실 수 있나요?"
+            )
 
         if candidate in previous_questions:
-            candidate = f"그 부분이 실제로는 어떻게 이어지는지 조금 더 설명해 주실 수 있나요?"
+            candidate = (
+                "그 부분이 실제로는 어떻게 이어지는지 "
+                "조금 더 설명해 주실 수 있나요?"
+            )
 
         return candidate
 
-    def _make_short_context(self, latest_context: str, fallback: str) -> str:
+    def _make_short_context(
+        self,
+        latest_context: str,
+        fallback: str,
+    ) -> str:
         """
         최근 발표 문맥을 질문에 넣기 좋게 짧게 자른다.
-        너무 긴 문장을 그대로 질문에 넣으면 부자연스러워지므로 20자 내외로 줄인다.
+
+        너무 긴 문장을 그대로 질문에 넣으면
+        부자연스러워지므로 20자 내외로 줄인다.
         """
         if not latest_context:
             return fallback
 
-        cleaned = re.sub(r"\s+", " ", latest_context).strip()
+        cleaned = re.sub(
+            r"\s+",
+            " ",
+            latest_context,
+        ).strip()
         cleaned = cleaned.replace("\n", " ")
 
         if len(cleaned) > 24:
-            cleaned = cleaned[:24].strip() + "..."
+            cleaned = (
+                cleaned[:24].strip()
+                + "..."
+            )
 
         return f"'{cleaned}'"
 
@@ -551,7 +765,7 @@ class QuestionService:
         question_text: str,
         user_answer: str,
         current_topic: str | None,
-        recent_context: List[str]
+        recent_context: List[str],
     ) -> float:
         """
         단순 룰 기반 답변 점수 계산.
@@ -574,20 +788,44 @@ class QuestionService:
         if len(answer) >= 60:
             score += 15
 
-        if current_topic and current_topic in answer:
+        if (
+            current_topic
+            and current_topic in answer
+        ):
             score += 20
 
         matched_context_terms = 0
 
-        for ctx in recent_context[-2:]:
-            for token in ctx.split():
-                token = token.strip(".,!?()[]\"'")
-                if len(token) >= 2 and token in answer:
+        for context in recent_context[-2:]:
+            for token in context.split():
+                token = token.strip(
+                    ".,!?()[]\"'"
+                )
+
+                if (
+                    len(token) >= 2
+                    and token in answer
+                ):
                     matched_context_terms += 1
 
-        score += min(matched_context_terms * 3, 20)
+        score += min(
+            matched_context_terms * 3,
+            20,
+        )
 
-        if any(word in answer for word in ["왜냐하면", "따라서", "즉", "예를 들어", "근거", "이유"]):
+        reason_words = [
+            "왜냐하면",
+            "따라서",
+            "즉",
+            "예를 들어",
+            "근거",
+            "이유",
+        ]
+
+        if any(
+            word in answer
+            for word in reason_words
+        ):
             score += 10
 
         return min(score, 100.0)
@@ -761,27 +999,43 @@ class QuestionService:
 
         return "confused"
 
-    def _build_evaluation_reason(self, answer_score: float, user_answer: str) -> str:
+    def _build_evaluation_reason(
+        self,
+        answer_score: float,
+        user_answer: str,
+    ) -> str:
         """
         답변 평가 이유 생성.
         """
         if answer_score >= 85:
-            return "답변이 구체적이고 논리적이며 질문의 핵심에 잘 답하고 있습니다."
+            return (
+                "답변이 구체적이고 논리적이며 "
+                "질문의 핵심에 잘 답하고 있습니다."
+            )
 
         if answer_score >= 65:
-            return "답변이 대체로 적절하지만 조금 더 구체적인 근거나 예시가 있으면 좋습니다."
+            return (
+                "답변이 대체로 적절하지만 조금 더 "
+                "구체적인 근거나 예시가 있으면 좋습니다."
+            )
 
         if answer_score >= 40:
-            return "답변은 일부 관련성이 있지만 질문에 대한 핵심 설명이 충분하지 않습니다."
+            return (
+                "답변은 일부 관련성이 있지만 질문에 대한 "
+                "핵심 설명이 충분하지 않습니다."
+            )
 
-        return "답변이 짧거나 질문과의 연결이 부족하여 추가 설명이 필요합니다."
+        return (
+            "답변이 짧거나 질문과의 연결이 부족하여 "
+            "추가 설명이 필요합니다."
+        )
 
     def _build_follow_up_question(
         self,
         question_text: str,
         current_topic: str | None,
         user_answer: str,
-        pressure_level: str
+        pressure_level: str,
     ) -> str:
         """
         답변이 부족할 경우 후속 질문 생성.
@@ -789,9 +1043,18 @@ class QuestionService:
         topic = current_topic or "해당 내용"
 
         if pressure_level == "high":
-            return f"그 부분에 대한 가장 중요한 근거를 하나만 더 말씀해 주실 수 있나요?"
+            return (
+                "그 부분에 대한 가장 중요한 근거를 "
+                "하나만 더 말씀해 주실 수 있나요?"
+            )
 
         if len(user_answer.strip()) < 20:
-            return f"조금 더 구체적인 예시를 하나 들어 주실 수 있나요?"
+            return (
+                "조금 더 구체적인 예시를 "
+                "하나 들어 주실 수 있나요?"
+            )
 
-        return f"그 내용이 왜 중요한지 한 가지로 정리해 주실 수 있나요?"
+        return (
+            "그 내용이 왜 중요한지 "
+            "한 가지로 정리해 주실 수 있나요?"
+        )
