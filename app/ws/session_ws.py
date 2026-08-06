@@ -1125,11 +1125,19 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                     continue
 
                 if not deepgram_started or not await stt.is_connected():
+                    # 연속 실패로 서킷브레이커가 발동 중이면 재연결 자체를 시도하지 않고
+                    # 이 청크만 조용히 버린다 (반복 재연결로 이벤트 루프가 밀려서
+                    # 프론트 WS까지 끊기는 사고를 막기 위함).
+                    if stt.in_cooldown():
+                        continue
                     try:
                         await ensure_deepgram_for_presentation("audio_chunk")
                     except Exception as e:
                         print(f"[STT 시작 에러] {e}")
                         await safe_close_stt("Deepgram 시작 실패")
+                        continue
+
+                    if not await stt.is_connected():
                         continue
 
                 try:

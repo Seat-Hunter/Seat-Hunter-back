@@ -18,6 +18,13 @@ from app.schemas.ws_message import make_final_transcript, make_partial_transcrip
 
 
 class STTAggregator:
+    # 연속 실패가 이 횟수에 도달하면 재연결을 잠시 쉰다.
+    # (Deepgram이 계속 죽어있는데 audio_chunk마다 재연결을 시도하면
+    #  이벤트 루프가 바빠져서 프론트 WS까지 끊기는 사고로 이어질 수 있음)
+    _MAX_CONSECUTIVE_FAILURES = 3
+    _BASE_COOLDOWN_SEC = 5.0
+    _MAX_COOLDOWN_SEC = 30.0
+
     def __init__(self, session_id: str):
         self.session_id = session_id
         self.sr = SessionRedis(session_id)
@@ -37,8 +44,31 @@ class STTAggregator:
         self._on_final_callback = None
         self._on_partial_callback = None
 
+        # 재연결 서킷브레이커 상태
+        self._consecutive_failures = 0
+        self._next_retry_at = 0.0
+
     async def is_connected(self) -> bool:
         return bool(self._dg_connection and self._connected and not self._closed)
+
+    def _in_cooldown(self) -> bool:
+        return time.time() < self._next_retry_at
+
+    def in_cooldown(self) -> bool:
+        """재연결 서킷브레이커가 발동 중인지 (호출부에서 재시도 자체를 건너뛰기 위함)."""
+        return self._in_cooldown()
+
+    def _record_failure(self):
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= self._MAX_CONSECUTIVE_FAILURES:
+            overflow = self._consecutive_failures - self._MAX_CONSECUTIVE_FAILURES
+            backoff = min(self._MAX_COOLDOWN_SEC, self._BASE_COOLDOWN_SEC * (2 ** overflow))
+            self._next_retry_at = time.time() + backoff
+            print(f"[Deepgram] 연속 실패 {self._consecutive_failures}회 → {backoff:.0f}초간 재연결 보류")
+
+    def _record_success(self):
+        self._consecutive_failures = 0
+        self._next_retry_at = 0.0
 
     async def ensure_connected(self):
         """
@@ -70,6 +100,10 @@ class STTAggregator:
         - 재연결은 session_ws.py가 다음 audio_chunk 수신 시 다시 start_deepgram()을 호출하는 방식으로 처리한다.
         """
         async with self._start_lock:
+            if self._in_cooldown():
+                remaining = self._next_retry_at - time.time()
+                raise RuntimeError(f"Deepgram 재연결 쿨다운 중 ({remaining:.1f}초 남음)")
+
             # 재시작 허용
             self._closed = False
 
@@ -82,6 +116,11 @@ class STTAggregator:
                     config=DeepgramClientOptions(
                         options={
                             "keepalive": True,
+                            # SDK의 send()는 기본적으로 실패해도 예외를 던지지 않고 False만
+                            # 반환하며 자체 로거로만 에러를 찍는다 (문자열 "true"일 때만 예외를 던짐).
+                            # 그 결과 audio_chunk 전송 실패도, SDK 내부 keepalive 전송 실패도
+                            # 우리 쪽 try/except가 전혀 감지하지 못해 죽은 연결을 계속 쓰게 됐다.
+                            "termination_exception_send": "true",
                         }
                     ),
                 )
@@ -141,6 +180,7 @@ class STTAggregator:
                     self._connected = False
 
                     if not self._closed:
+                        self._record_failure()
                         await self._finish_deepgram_connection(
                             reason="deepgram_error_event",
                             mark_closed=False,
@@ -151,6 +191,9 @@ class STTAggregator:
                     self._connected = False
 
                     if not self._closed:
+                        # 세션 종료 등으로 우리가 직접 닫은 게 아니라 Deepgram/네트워크 쪽에서
+                        # 끊긴 경우(예: keepalive ping timeout 1011)만 실패로 집계한다.
+                        self._record_failure()
                         await self._finish_deepgram_connection(
                             reason="deepgram_close_event",
                             mark_closed=False,
@@ -176,12 +219,14 @@ class STTAggregator:
 
                 await self._dg_connection.start(options)
                 self._connected = True
+                self._record_success()
 
                 print("[Deepgram] 연결 시작 완료")
 
             except Exception as e:
                 self._connected = False
                 self._dg_connection = None
+                self._record_failure()
                 print(f"[Deepgram 연결 실패] {e}")
                 raise
 
@@ -231,6 +276,7 @@ class STTAggregator:
             print(f"[오디오 전송 에러] {e}")
 
             self._connected = False
+            self._record_failure()
 
             await self._finish_deepgram_connection(
                 reason="send_audio_failed",
