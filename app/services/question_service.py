@@ -57,6 +57,10 @@ class QuestionService:
     룰 기반 로직으로 폴백한다.
     """
 
+    # 두 번째 꼬리질문(follow_up_count 1→2)은 첫 번째보다 훨씬 엄격하게 건다.
+    # "조금 부족함" 수준으로는 안 나가고, 답변 점수가 이 값 미만일 때만 나간다.
+    SECOND_FOLLOW_UP_MAX_SCORE = 40.0
+
     async def analyze_presentation_style(
         self,
         context: str,
@@ -184,11 +188,15 @@ class QuestionService:
 [이전 질문]
 {previous_questions}
 
-[지금까지 들은 발표 내용]
+[발표 전체 맥락 — 지금까지 발표에서 실제로 한 말 전체]
+{data.full_context or "없음"}
+
+[방금 흐름 — 질문 타이밍 판단에 참고]
 {context}
 
 위 발표 내용에서 실제로 근거를 찾을 수 있는,
 가장 자연스럽고 유익한 질문 한 문장만 출력해라.
+질문이 [발표 전체 맥락]에서 이미 설명된 내용과 어긋나지 않는지도 확인해라.
 """.strip()
 
         try:
@@ -196,6 +204,8 @@ class QuestionService:
                 _openai_client.responses.create,
                 model=settings.openai_question_model,
                 input=prompt,
+                # 짧은 한 문장 생성/JSON 평가 작업이라 깊은 추론이 필요 없다.
+                reasoning={"effort": "minimal"},
             )
 
             question_text = (
@@ -314,8 +324,15 @@ class QuestionService:
 [현재 발표 주제]
 {data.current_topic or "알 수 없음"}
 
-[최근 발표 맥락]
+[발표 전체 맥락 — 지금까지 발표에서 실제로 한 말 전체]
+{data.full_context or "없음"}
+
+[방금 흐름 — 참고용]
 {recent_context}
+
+사용자 답변이 [발표 전체 맥락]과 연결되는 내용이라면(예: 발표 주제 자체가 이
+답변 내용과 관련된 경우) 그 연결을 인정하고 평가해라. 최근 2문장만 보고
+맥락과 무관하다고 단정하지 않는다.
 
 [꼬리질문 상태]
 - 현재 꼬리질문 횟수: {follow_up_count}
@@ -395,6 +412,8 @@ class QuestionService:
                 _openai_client.responses.create,
                 model=settings.openai_question_model,
                 input=prompt,
+                # 짧은 한 문장 생성/JSON 평가 작업이라 깊은 추론이 필요 없다.
+                reasoning={"effort": "minimal"},
             )
 
             text = result.output_text.strip()
@@ -441,6 +460,10 @@ class QuestionService:
                 not sufficient
                 and follow_up_count < max_follow_ups
             )
+
+            # 두 번째 꼬리질문은 "애매하게 부족함"만으로는 안 나가게, 점수까지 확인한다.
+            if follow_up_needed and follow_up_count == 1 and score >= self.SECOND_FOLLOW_UP_MAX_SCORE:
+                follow_up_needed = False
 
             if not follow_up_needed:
                 follow_up = None
@@ -531,11 +554,22 @@ class QuestionService:
         answer_score = max(0.0, min(answer_score, 100.0))
         feedback = self._build_category_feedback(category)
 
+        follow_up_count = getattr(data, "follow_up_count", 0) or 0
+        try:
+            follow_up_count = int(follow_up_count)
+        except Exception:
+            follow_up_count = 0
+
         if category in ("DONT_KNOW", "OFF_TOPIC", "NONSENSE"):
             follow_up_needed = False
             follow_up_question = None
         else:
             follow_up_needed = category == "PARTIAL" and answer_score < 70
+
+            # 두 번째 꼬리질문은 점수가 훨씬 낮을 때만 (자세한 이유는 evaluate_answer_ai 참고)
+            if follow_up_needed and follow_up_count == 1 and answer_score >= self.SECOND_FOLLOW_UP_MAX_SCORE:
+                follow_up_needed = False
+
             follow_up_question = None
             if follow_up_needed:
                 follow_up_question = self._build_follow_up_question(

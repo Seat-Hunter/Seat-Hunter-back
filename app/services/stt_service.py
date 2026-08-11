@@ -161,7 +161,15 @@ class STTAggregator:
 
                             return
 
-                        await self._on_final_transcript(text, result)
+                        # final transcript 처리(LLM 인터럽트 판단~질문 생성~브로드캐스트)는
+                        # 이 커넥션의 내부 태스크에 묶어두지 않는다.
+                        # Deepgram 연결이 중간에 끊겨 conn.finish()가 호출되면 SDK가
+                        # 이 콜백이 걸려 있던 태스크를 취소하는데, 하필 그 타이밍에
+                        # 질문 생성/브로드캐스트가 진행 중이면 asyncio.CancelledError로
+                        # 조용히 유실된다 (CancelledError는 Exception이 아니라서
+                        # 아래 except로도 못 잡고, 로그도 안 남고 질문도 안 나감).
+                        # 별도 태스크로 분리해서 커넥션 생명주기와 무관하게 끝까지 실행되게 한다.
+                        asyncio.create_task(self._run_final_transcript(text, result))
 
                     except Exception as e:
                         print(f"[STT transcript 에러] {e}")
@@ -252,6 +260,19 @@ class STTAggregator:
                 await self._on_final_callback(text, start_ms, end_ms)
             except Exception as e:
                 print(f"[STT 콜백 에러] {e}")
+
+    async def _run_final_transcript(self, text: str, result):
+        """
+        on_transcript가 asyncio.create_task로 띄우는 진입점.
+
+        Deepgram 커넥션의 내부 태스크와 분리된 별도 태스크에서 실행되므로,
+        처리 도중 커넥션이 끊겨 conn.finish()가 호출되더라도 이 태스크는
+        취소되지 않고 LLM 인터럽트 판단~질문 생성~브로드캐스트까지 끝까지 진행된다.
+        """
+        try:
+            await self._on_final_transcript(text, result)
+        except Exception as e:
+            print(f"[STT final transcript 처리 에러] {e}")
 
     async def send_audio(self, audio_base64: str):
         """

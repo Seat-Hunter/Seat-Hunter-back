@@ -141,8 +141,12 @@ async def session_websocket(websocket: WebSocket, session_id: str):
     # 시작 시각으로 써서 실제 발화 간격(침묵 포함)이 duration에 반영되게 한다.
     last_presentation_final_end_ms: int | None = None
 
-    # 발표 대본(scripts) segment_index — Deepgram final은 여기서만 저장
-    presentation_segment_index: int = 0
+    # 발표 대본(scripts) 누적 버퍼. 세그먼트마다 바로 Supabase에 저장하지 않고
+    # 메모리에 쌓아뒀다가 세션 종료 시(finally) 한 번에 start_ms 순으로 정렬해서 저장한다.
+    # (매 세그먼트마다 동기 INSERT를 날리면 이벤트 루프가 그때마다 블로킹되고,
+    #  final transcript가 독립 태스크로 처리되면서 실제 발화 순서와 다르게 도착해
+    #  segment_index가 꼬이는 문제가 있었음 — 끝에 한 번만 정렬해서 저장하면 둘 다 해결됨)
+    presentation_script_segments: list[dict] = []
 
     QUESTION_ACCEPT_TIMEOUT_SEC = 20.0
     MAX_FOLLOW_UPS = 2
@@ -150,27 +154,90 @@ async def session_websocket(websocket: WebSocket, session_id: str):
     deepgram_started = False
     websocket_closed = False
 
+    # 질문 생성 파이프라인(LLM 판단 → 질문 생성 → 브로드캐스트) 동시 실행 방지.
+    # on_transcript가 final transcript마다 독립 태스크를 띄우게 되면서, 서로 다른
+    # 세그먼트를 처리하는 두 태스크가 동시에 current_question_id == None을 보고
+    # 둘 다 질문을 만들어 버릴 수 있다. 이 락으로 한 번에 하나만 진행되게 한다.
+    interrupt_pipeline_lock = asyncio.Lock()
+
     # LLM 인터럽트 판단 호출 제한
     # 질문이 반드시 어느 정도 나와야 하므로 5초/40자보다 조금 완화
     last_llm_interrupt_check_at: float = 0.0
-    last_llm_checked_transcript_len: int = 0
+
+    # 마지막 LLM 판단 이후 새로 들어온 발화 글자 수 누적.
+    # recent_transcript(Redis)는 push_transcript()에서 최근 10문장으로 ltrim되는
+    # 슬라이딩 윈도우라서, len(recent_transcript)의 증감으로 "새로 늘어난 양"을
+    # 재는 건 버그였다 — 10문장이 다 차면 새 문장이 들어올 때마다 가장 오래된
+    # 문장이 같이 빠지기 때문에 전체 길이가 정체되거나 줄어들어, 발화가 계속
+    # 이어져도 delta가 영원히 임계값 밑에 머무를 수 있었다.
+    # (실제로 이 때문에 버퍼가 다 찬 뒤로는 인터럽트 판단이 계속 생략됐음)
+    new_transcript_chars_since_check: int = 0
 
     LLM_INTERRUPT_CHECK_INTERVAL_SEC = 3.0
     LLM_INTERRUPT_MIN_TRANSCRIPT_DELTA = 25
 
-    async def save_presentation_script(text: str, start_ms: int, end_ms: int):
-        """발표 구간 Deepgram final만 scripts 테이블에 저장."""
-        nonlocal presentation_segment_index
+    # 발표 재개 시점부터 다음 질문까지의 최소 간격
+    INTERRUPT_COOLDOWN_MS = 20000
+
+    def collect_presentation_script(text: str, start_ms: int, end_ms: int):
+        """발표 구간 Deepgram final을 메모리 버퍼에 쌓는다. 실제 저장은 flush에서."""
+        presentation_script_segments.append({
+            "text": text,
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+        })
+
+    def get_full_presentation_transcript() -> str:
+        """
+        지금까지 발표에서 실제로 한 말 전체 (요약 아님, 원문 그대로).
+
+        인터럽트 판단/질문 생성/답변 평가가 직전 몇 문장만 보고 발표 전체
+        맥락(예: 이 발표가 뭘 소개하는 자리인지)을 놓치는 문제가 있어서,
+        이미 메모리에 쌓아둔 presentation_script_segments를 그대로 이어붙여 넘긴다.
+        """
+        if not presentation_script_segments:
+            return ""
+
+        sorted_segments = sorted(
+            presentation_script_segments,
+            key=lambda seg: seg["start_ms"],
+        )
+        return " ".join(seg["text"] for seg in sorted_segments)
+
+    async def flush_presentation_script():
+        """
+        세션이 끝날 때(finally) 딱 한 번 호출된다.
+
+        start_ms 기준으로 정렬해서 bulk insert하므로, 발표 중 final transcript가
+        독립 태스크로 처리되면서 실제 발화 순서와 다르게 도착하더라도 저장 순서는
+        항상 실제 발화 순서(오른쪽 화면에 뜬 순서)와 일치한다.
+        """
+        if not presentation_script_segments:
+            return
+
         try:
+            sorted_segments = sorted(
+                presentation_script_segments,
+                key=lambda seg: seg["start_ms"],
+            )
+
+            rows = [
+                {
+                    "session_id": session_id,
+                    "transcript": seg["text"],
+                    "start_ms": seg["start_ms"],
+                    "end_ms": seg["end_ms"],
+                    "segment_index": idx,
+                }
+                for idx, seg in enumerate(sorted_segments)
+            ]
+
             sb = get_supabase()
-            sb.table("scripts").insert({
-                "session_id": session_id,
-                "transcript": text,
-                "start_ms": start_ms,
-                "end_ms": end_ms,
-                "segment_index": presentation_segment_index,
-            }).execute()
-            presentation_segment_index += 1
+            sb.table("scripts").insert(rows).execute()
+
+            # finish_session/WebSocketDisconnect에서 이미 flush한 뒤 finally의
+            # 안전망이 또 호출해도 중복 저장되지 않도록 비운다.
+            presentation_script_segments.clear()
         except Exception as e:
             print(f"[scripts 저장 에러] {e}")
 
@@ -404,6 +471,11 @@ async def session_websocket(websocket: WebSocket, session_id: str):
 
         await safe_set_tts_playing(False)
 
+        # 쿨다운을 "질문이 나온 시점"이 아니라 "발표로 복귀한 시점"부터 다시 잰다.
+        # 안 그러면 TTS 재생+답변+평가로 30초가 그냥 지나가버려서, 발표 재개하자마자
+        # 쿨다운이 이미 끝나 있어 바로 다음 질문이 튀어나오는 문제가 있었다.
+        await sr.set_last_interrupt_at(time.time())
+
         try:
             await sr.set_state(SessionState.RUNNING)
             await safe_broadcast(make_session_state(SessionState.RUNNING))
@@ -446,6 +518,10 @@ async def session_websocket(websocket: WebSocket, session_id: str):
 
         await safe_set_tts_playing(False)
         await safe_broadcast({"type": "question_resolved"})
+
+        # 쿨다운을 "질문이 나온 시점"이 아니라 "발표로 복귀한 시점"부터 다시 잰다.
+        # (이유는 handle_question_accept_timeout의 같은 코드 참고)
+        await sr.set_last_interrupt_at(time.time())
 
         try:
             await sr.set_state(SessionState.RUNNING)
@@ -598,6 +674,34 @@ async def session_websocket(websocket: WebSocket, session_id: str):
 
         return False
 
+    async def _auto_interrupt_slot_still_open() -> bool:
+        """
+        자동 인터럽트 질문(should_interrupt=True) 생성 파이프라인 도중,
+        느린 LLM 호출(decide/generate_question_ai)이 끝나길 기다리는 사이에
+        이미 다른 질문 흐름이 시작되지는 않았는지 재확인한다.
+
+        decide()와 generate_question_ai()는 각각 OpenAI 왕복 시간이 걸리는데,
+        그 사이 사용자가 이미 뜬 질문을 수락(accept_question)해서 TTS/ANSWERING
+        상태로 넘어갔거나, current_question_id가 이미 채워졌을 수 있다.
+        이런 재확인 없이 그대로 커밋하면, 앞서 뜬 질문(q_1 등)이 답변도 못 받고
+        새 질문(q_2 등)에 덮어써지는 문제가 생긴다.
+        """
+        if current_question_id:
+            return False
+
+        if await sr.get_tts_playing():
+            return False
+
+        state = await sr.get_state()
+
+        if _is_state(state, SessionState.ANSWERING) or _is_state(state, SessionState.INTERRUPTED):
+            return False
+
+        if not _is_state(state, SessionState.RUNNING):
+            return False
+
+        return True
+
     # ============================================================
     # 발표 transcript 처리
     # ============================================================
@@ -620,7 +724,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
         nonlocal answer_buffer
         nonlocal accept_timeout_task
         nonlocal last_llm_interrupt_check_at
-        nonlocal last_llm_checked_transcript_len
+        nonlocal new_transcript_chars_since_check
 
         clean_text = text.strip()
         if not clean_text:
@@ -640,8 +744,8 @@ async def session_websocket(websocket: WebSocket, session_id: str):
             return
 
         try:
-            # 발표 대본 저장: RUNNING일 때만 (질문 받기 전 포함)
-            await save_presentation_script(clean_text, start_ms, end_ms)
+            # 발표 대본 버퍼링: RUNNING일 때만 (질문 받기 전 포함). 실제 저장은 세션 종료 시.
+            collect_presentation_script(clean_text, start_ms, end_ms)
 
             analysis = await speech_analyzer.analyze(SpeechAnalysisInput(
                 text=clean_text,
@@ -690,10 +794,12 @@ async def session_websocket(websocket: WebSocket, session_id: str):
             # 새 인터럽트 판단만 막는다.
             if current_question_id:
                 await sr.push_transcript(clean_text)
+                new_transcript_chars_since_check += len(clean_text)
                 return
 
             # Redis 최근 transcript는 인터럽트 판단용
             await sr.push_transcript(clean_text)
+            new_transcript_chars_since_check += len(clean_text)
 
             recent_transcript_raw = await sr.get_recent_transcript()
 
@@ -709,129 +815,145 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                 print("[LLM 인터럽트 판단 생략] 호출 간격 제한")
                 return
 
-            transcript_delta = len(recent_transcript) - last_llm_checked_transcript_len
-
-            if transcript_delta < LLM_INTERRUPT_MIN_TRANSCRIPT_DELTA:
+            if new_transcript_chars_since_check < LLM_INTERRUPT_MIN_TRANSCRIPT_DELTA:
                 print("[LLM 인터럽트 판단 생략] 최근 transcript 변화량 부족")
                 return
 
             last_llm_interrupt_check_at = now_for_llm_check
-            last_llm_checked_transcript_len = len(recent_transcript)
+            new_transcript_chars_since_check = 0
 
-            last_interrupt = await sr.get_last_interrupt_at()
-            cooldown_remaining = 0
+            # 여기서부터 decide()/generate_question_ai() 두 번의 느린 LLM 호출이 이어진다.
+            # on_transcript가 final transcript마다 독립 태스크를 띄우기 때문에, 락 없이
+            # 진행하면 서로 다른 세그먼트를 처리하는 두 태스크가 동시에 이 구간에
+            # 들어와 둘 다 질문을 만들어 버릴 수 있다 (앞선 질문이 무시되는 버그).
+            async with interrupt_pipeline_lock:
+                # 락을 기다리는 동안 다른 태스크가 이미 질문을 띄웠을 수 있으니 재확인
+                if not await _auto_interrupt_slot_still_open():
+                    print("[LLM 인터럽트 판단 생략] 락 대기 중 다른 질문 흐름이 시작됨")
+                    return
 
-            if last_interrupt:
-                elapsed = (time.time() - last_interrupt) * 1000
-                cooldown_remaining = max(0, 30000 - elapsed)
+                last_interrupt = await sr.get_last_interrupt_at()
+                cooldown_remaining = 0
 
-            interrupt_input = InterruptDecisionInput(
-                speech_metrics=SpeechMetricsInput(
-                    recent_wpm=analysis.recent_wpm,
-                    average_wpm=analysis.average_wpm,
-                    filler_count=analysis.filler_count,
-                    silence_duration=analysis.silence_duration,
-                    hesitation_score=analysis.hesitation_score,
-                    stress_score=analysis.stress_score,
-                ),
-                context_state=ContextStateInput(
-                    current_topic=session_topic,
-                    drift_score=0.0,
-                    topic_shift_detected=False,
-                    latest_utterance=clean_text,
-                    recent_transcript=recent_transcript,
-                    slide_context=None,
-                    script_context=None,
-                ),
-                interrupt_enabled=session_interrupt_enabled,
-                cooldown_remaining_ms=int(cooldown_remaining),
-                pressure_level=session_pressure_level,
-                presentation_type=session_presentation_type,
-                audience_type=session_audience_type,
-                audience_count=session_audience_count,
-                previous_questions=previous_questions,
-            )
+                if last_interrupt:
+                    elapsed = (time.time() - last_interrupt) * 1000
+                    cooldown_remaining = max(0, INTERRUPT_COOLDOWN_MS - elapsed)
 
-            decision = await interrupt_service.decide(interrupt_input)
-            log_llm_interrupt_decision(decision)
-
-            if not decision.should_interrupt:
-                return
-
-            try:
-                question_result = await question_service.generate_question_ai(
-                    QuestionGenerationInput(
+                interrupt_input = InterruptDecisionInput(
+                    speech_metrics=SpeechMetricsInput(
+                        recent_wpm=analysis.recent_wpm,
+                        average_wpm=analysis.average_wpm,
+                        filler_count=analysis.filler_count,
+                        silence_duration=analysis.silence_duration,
+                        hesitation_score=analysis.hesitation_score,
+                        stress_score=analysis.stress_score,
+                    ),
+                    context_state=ContextStateInput(
                         current_topic=session_topic,
-                        recent_context=recent_context_list,
-                        audience_type=session_audience_type,
-                        presentation_type=session_presentation_type,
-                        audience_count=session_audience_count,
-                        pressure_level=session_pressure_level,
-                        previous_questions=previous_questions,
-                    )
+                        drift_score=0.0,
+                        topic_shift_detected=False,
+                        latest_utterance=clean_text,
+                        recent_transcript=recent_transcript,
+                        slide_context=None,
+                        script_context=get_full_presentation_transcript(),
+                    ),
+                    interrupt_enabled=session_interrupt_enabled,
+                    cooldown_remaining_ms=int(cooldown_remaining),
+                    pressure_level=session_pressure_level,
+                    presentation_type=session_presentation_type,
+                    audience_type=session_audience_type,
+                    audience_count=session_audience_count,
+                    previous_questions=previous_questions,
                 )
-            except Exception as e:
-                print(f"[질문 생성 에러] {e}")
-                return
 
-            # 질문 생성이 성공한 뒤에만 cooldown 시작
-            await sr.set_last_interrupt_at(time.time())
+                decision = await interrupt_service.decide(interrupt_input)
+                log_llm_interrupt_decision(decision)
 
-            previous_questions.append(question_result.question_text)
+                if not decision.should_interrupt:
+                    return
 
-            current_question = question_result.question_text
-            follow_up_count = 0
-            follow_up_history = []
-            answer_buffer.clear()
+                # decide() 왕복 시간 사이에 이미 다른 질문 흐름이 시작됐을 수 있으니 재확인
+                if not await _auto_interrupt_slot_still_open():
+                    print("[LLM 인터럽트 판단 폐기] 판단 완료 전에 다른 질문 흐름이 시작됨")
+                    return
 
-            q_id = f"q_{len(previous_questions)}"
-            current_question_id = q_id
-            parent_question_id = q_id
+                try:
+                    question_result = await question_service.generate_question_ai(
+                        QuestionGenerationInput(
+                            current_topic=session_topic,
+                            recent_context=recent_context_list,
+                            full_context=get_full_presentation_transcript(),
+                            audience_type=session_audience_type,
+                            presentation_type=session_presentation_type,
+                            audience_count=session_audience_count,
+                            pressure_level=session_pressure_level,
+                            previous_questions=previous_questions,
+                        )
+                    )
+                except Exception as e:
+                    print(f"[질문 생성 에러] {e}")
+                    return
 
-            log_new_question(q_id, current_question)
+                # 질문 생성 왕복 시간 사이에도 마찬가지로 재확인
+                if not await _auto_interrupt_slot_still_open():
+                    print("[질문 생성 폐기] 생성 완료 전에 다른 질문 흐름이 시작됨")
+                    return
 
-            try:
-                _log_raw = await sr.r.get(f"session:{session_id}:interrupt_log")
-                _log = json.loads(_log_raw) if _log_raw else []
+                previous_questions.append(question_result.question_text)
 
-                _log.append({
+                current_question = question_result.question_text
+                follow_up_count = 0
+                follow_up_history = []
+                answer_buffer.clear()
+
+                q_id = f"q_{len(previous_questions)}"
+                current_question_id = q_id
+                parent_question_id = q_id
+
+                log_new_question(q_id, current_question)
+
+                try:
+                    _log_raw = await sr.r.get(f"session:{session_id}:interrupt_log")
+                    _log = json.loads(_log_raw) if _log_raw else []
+
+                    _log.append({
+                        "question_id": q_id,
+                        "parent_question_id": parent_question_id,
+                        "question_text": question_result.question_text,
+                        "reason": decision.reason,
+                        "interrupt_type": decision.interrupt_type,
+                        "triggered_by": decision.triggered_by,
+                        "confidence": getattr(decision, "confidence", None),
+                        "is_follow_up": False,
+                        "follow_up_count": 0,
+                        "max_follow_ups": MAX_FOLLOW_UPS,
+                        "created_at": time.time(),
+                    })
+
+                    await sr.r.set(
+                        f"session:{session_id}:interrupt_log",
+                        json.dumps(_log, ensure_ascii=False),
+                    )
+                except Exception as e:
+                    print(f"[질문 로그 저장 에러] {e}")
+
+                await safe_broadcast({
+                    "type": "interrupt_question",
                     "question_id": q_id,
                     "parent_question_id": parent_question_id,
                     "question_text": question_result.question_text,
-                    "reason": decision.reason,
+                    "pressure_level": session_pressure_level,
+                    "is_follow_up": False,
+                    "follow_up_count": follow_up_count,
+                    "max_follow_ups": MAX_FOLLOW_UPS,
+                    "interrupt_reason": decision.reason,
                     "interrupt_type": decision.interrupt_type,
                     "triggered_by": decision.triggered_by,
                     "confidence": getattr(decision, "confidence", None),
-                    "is_follow_up": False,
-                    "follow_up_count": 0,
-                    "max_follow_ups": MAX_FOLLOW_UPS,
-                    "created_at": time.time(),
                 })
 
-                await sr.r.set(
-                    f"session:{session_id}:interrupt_log",
-                    json.dumps(_log, ensure_ascii=False),
-                )
-            except Exception as e:
-                print(f"[질문 로그 저장 에러] {e}")
-
-            await safe_broadcast({
-                "type": "interrupt_question",
-                "question_id": q_id,
-                "parent_question_id": parent_question_id,
-                "question_text": question_result.question_text,
-                "pressure_level": session_pressure_level,
-                "is_follow_up": False,
-                "follow_up_count": follow_up_count,
-                "max_follow_ups": MAX_FOLLOW_UPS,
-                "interrupt_reason": decision.reason,
-                "interrupt_type": decision.interrupt_type,
-                "triggered_by": decision.triggered_by,
-                "confidence": getattr(decision, "confidence", None),
-            })
-
-            await cancel_accept_timeout()
-            accept_timeout_task = asyncio.create_task(handle_question_accept_timeout(q_id))
+                await cancel_accept_timeout()
+                accept_timeout_task = asyncio.create_task(handle_question_accept_timeout(q_id))
 
         except Exception as e:
             print(f"[분석 파이프라인 에러] {e}")
@@ -927,6 +1049,7 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                     user_answer=user_answer,
                     current_topic=session_topic,
                     recent_context=recent_context_list,
+                    full_context=get_full_presentation_transcript(),
                     pressure_level=session_pressure_level,
                     is_follow_up=follow_up_count > 0,
                     follow_up_count=follow_up_count,
@@ -1288,6 +1411,10 @@ async def session_websocket(websocket: WebSocket, session_id: str):
                 await safe_close_stt("finish_session 수신")
                 await safe_set_tts_playing(False)
 
+                # end_session()이 scripts 테이블을 읽어서 리포트를 만들기 때문에,
+                # 그 전에 버퍼링해둔 대본을 먼저 저장해야 한다.
+                await flush_presentation_script()
+
                 try:
                     await session_service.end_session(session_id)
                 except Exception as e:
@@ -1346,6 +1473,10 @@ async def session_websocket(websocket: WebSocket, session_id: str):
             await safe_close_stt("WebSocketDisconnect")
             await safe_set_tts_playing(False)
 
+            # end_session()이 scripts 테이블을 읽어서 리포트를 만들기 때문에,
+            # 그 전에 버퍼링해둔 대본을 먼저 저장해야 한다.
+            await flush_presentation_script()
+
             try:
                 await session_service.end_session(session_id)
             except Exception as e:
@@ -1371,6 +1502,11 @@ async def session_websocket(websocket: WebSocket, session_id: str):
             print(f"[WS 종료 처리] tts_playing 초기화 실패: {e}")
 
         await safe_close_stt("finally 정리")
+
+        # 위 경로들(finish_session/WebSocketDisconnect)에서 이미 flush했다면
+        # 버퍼가 비어 있어 아무 일도 안 함. cancel_session이나 예외로 끝난 경우처럼
+        # flush가 안 된 채로 여기까지 온 경우를 위한 안전망.
+        await flush_presentation_script()
 
         try:
             ws_manager.disconnect(session_id, websocket)

@@ -16,6 +16,7 @@ class QuestionGenerationInput(BaseModel):
     - previous_questions: 이전에 했던 질문들
     """
     recent_context: List[str] = Field(default_factory=list)
+    full_context: Optional[str] = None  # 지금까지 발표한 전체 발화 (요약 아님, 원문 그대로)
     current_topic: Optional[str] = None
     audience_type: str
     presentation_type: str
@@ -61,6 +62,7 @@ class AnswerEvaluationInput(BaseModel):
 
     current_topic: Optional[str] = None
     recent_context: List[str] = Field(default_factory=list)
+    full_context: Optional[str] = None  # 지금까지 발표한 전체 발화 (요약 아님, 원문 그대로)
     pressure_level: str = "medium"
 
     is_follow_up: bool = False

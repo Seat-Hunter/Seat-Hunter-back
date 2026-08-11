@@ -26,7 +26,9 @@ class AnswerStateMsg(BaseModel):
     state: Literal["started", "ended"]
 
 def make_partial_transcript(text: str) -> dict:
-    return {"type": "partial_transcript", "text": text}
+    # 클라이언트가 답변 구간에 보내는 "partial_transcript"(client→server) 메시지와
+    # 타입 이름이 겹치지 않도록 서버→클라이언트 브로드캐스트는 별도 이름을 쓴다.
+    return {"type": "stt_partial_transcript", "text": text}
 
 def make_final_transcript(segment_id: str, text: str, start_ms: int, end_ms: int) -> dict:
     return {"type": "final_transcript", "segment_id": segment_id,
