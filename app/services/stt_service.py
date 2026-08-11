@@ -242,9 +242,16 @@ class STTAggregator:
         segment_id = f"seg_{self.session_id}_{self._segment_index}"
         now_ms = int(time.time() * 1000)
 
-        start_ms = int(result.start * 1000) if hasattr(result, "start") else now_ms
+        # result.start는 Deepgram 커넥션이 "시작된 시점" 기준 상대 타임스탬프라서,
+        # 질문/답변 구간마다 재연결이 일어날 때마다 다시 0 근처로 리셋된다.
+        # 세션 전체를 관통하는 절대 시각이 필요한 곳(대본 정렬, 발표 시간 계산)에
+        # 그대로 쓰면 순서와 duration이 다 꼬인다 (silence_tracker.py가 이미 같은
+        # 이유로 wall clock을 쓰는 것과 동일한 문제).
+        # duration은 발화 길이 자체라 재연결과 무관하게 정확하므로 그대로 믿고,
+        # 절대 위치(start/end)는 결과가 도착한 wall clock 시각을 기준으로 잡는다.
         duration_ms = int(result.duration * 1000) if hasattr(result, "duration") else 0
-        end_ms = start_ms + duration_ms
+        end_ms = now_ms
+        start_ms = max(0, end_ms - duration_ms)
 
         # scripts 저장은 session_ws.on_final_transcript()에서만 한다.
         # (답변/질문 구간 Deepgram 결과가 발표 대본에 섞이지 않도록 상태 검사 후 저장)
