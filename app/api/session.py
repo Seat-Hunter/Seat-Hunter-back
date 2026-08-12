@@ -1,6 +1,7 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from app.schemas.session import SessionCreateRequest, SessionCreateResponse, SessionState
 from app.services.session_service import SessionService
+from app.api.deps import get_current_user_id
 
 router = APIRouter()
 service = SessionService()
@@ -16,8 +17,8 @@ service = SessionService()
     ),
     status_code=201,
 )
-async def create_session(body: SessionCreateRequest):
-    session_id = await service.create_session(body.model_dump())
+async def create_session(body: SessionCreateRequest, user_id: int = Depends(get_current_user_id)):
+    session_id = await service.create_session(body.model_dump(), user_id)
     return SessionCreateResponse(session_id=session_id, state=SessionState.READY)
 
 

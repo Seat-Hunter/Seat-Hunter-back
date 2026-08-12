@@ -14,11 +14,17 @@ from deepgram import (
 from app.core.config import settings
 from app.core.redis_client import SessionRedis
 from app.core.websocket_manager import ws_manager
-from app.core.supabase_client import get_supabase
 from app.schemas.ws_message import make_final_transcript, make_partial_transcript
 
 
 class STTAggregator:
+    # 연속 실패가 이 횟수에 도달하면 재연결을 잠시 쉰다.
+    # (Deepgram이 계속 죽어있는데 audio_chunk마다 재연결을 시도하면
+    #  이벤트 루프가 바빠져서 프론트 WS까지 끊기는 사고로 이어질 수 있음)
+    _MAX_CONSECUTIVE_FAILURES = 3
+    _BASE_COOLDOWN_SEC = 5.0
+    _MAX_COOLDOWN_SEC = 30.0
+
     def __init__(self, session_id: str):
         self.session_id = session_id
         self.sr = SessionRedis(session_id)
@@ -38,6 +44,52 @@ class STTAggregator:
         self._on_final_callback = None
         self._on_partial_callback = None
 
+        # 재연결 서킷브레이커 상태
+        self._consecutive_failures = 0
+        self._next_retry_at = 0.0
+
+    async def is_connected(self) -> bool:
+        return bool(self._dg_connection and self._connected and not self._closed)
+
+    def _in_cooldown(self) -> bool:
+        return time.time() < self._next_retry_at
+
+    def in_cooldown(self) -> bool:
+        """재연결 서킷브레이커가 발동 중인지 (호출부에서 재시도 자체를 건너뛰기 위함)."""
+        return self._in_cooldown()
+
+    def _record_failure(self):
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= self._MAX_CONSECUTIVE_FAILURES:
+            overflow = self._consecutive_failures - self._MAX_CONSECUTIVE_FAILURES
+            backoff = min(self._MAX_COOLDOWN_SEC, self._BASE_COOLDOWN_SEC * (2 ** overflow))
+            self._next_retry_at = time.time() + backoff
+            print(f"[Deepgram] 연속 실패 {self._consecutive_failures}회 → {backoff:.0f}초간 재연결 보류")
+
+    def _record_success(self):
+        self._consecutive_failures = 0
+        self._next_retry_at = 0.0
+
+    async def ensure_connected(self):
+        """
+        Deepgram이 살아 있지 않으면 다시 연결한다.
+        질문/답변 구간 동안 오디오가 끊겨 keepalive가 죽어도
+        발표 재개 후 바로 복구할 수 있게 한다.
+        """
+        if await self.is_connected():
+            return
+        await self.start_deepgram()
+
+    async def force_reconnect(self, reason: str = "force_reconnect"):
+        """
+        기존 연결을 정리한 뒤 새로 연결한다.
+        발표 재개 직후 죽은 소켓을 붙잡고 있지 않도록 사용한다.
+        """
+        print(f"[Deepgram] 강제 재연결: {reason}")
+        await self._finish_deepgram_connection(reason=reason, mark_closed=False)
+        self._closed = False
+        await self.start_deepgram()
+
     async def start_deepgram(self):
         """
         Deepgram live transcription 연결 시작.
@@ -48,6 +100,10 @@ class STTAggregator:
         - 재연결은 session_ws.py가 다음 audio_chunk 수신 시 다시 start_deepgram()을 호출하는 방식으로 처리한다.
         """
         async with self._start_lock:
+            if self._in_cooldown():
+                remaining = self._next_retry_at - time.time()
+                raise RuntimeError(f"Deepgram 재연결 쿨다운 중 ({remaining:.1f}초 남음)")
+
             # 재시작 허용
             self._closed = False
 
@@ -60,6 +116,11 @@ class STTAggregator:
                     config=DeepgramClientOptions(
                         options={
                             "keepalive": True,
+                            # SDK의 send()는 기본적으로 실패해도 예외를 던지지 않고 False만
+                            # 반환하며 자체 로거로만 에러를 찍는다 (문자열 "true"일 때만 예외를 던짐).
+                            # 그 결과 audio_chunk 전송 실패도, SDK 내부 keepalive 전송 실패도
+                            # 우리 쪽 try/except가 전혀 감지하지 못해 죽은 연결을 계속 쓰게 됐다.
+                            "termination_exception_send": "true",
                         }
                     ),
                 )
@@ -100,7 +161,15 @@ class STTAggregator:
 
                             return
 
-                        await self._on_final_transcript(text, result)
+                        # final transcript 처리(LLM 인터럽트 판단~질문 생성~브로드캐스트)는
+                        # 이 커넥션의 내부 태스크에 묶어두지 않는다.
+                        # Deepgram 연결이 중간에 끊겨 conn.finish()가 호출되면 SDK가
+                        # 이 콜백이 걸려 있던 태스크를 취소하는데, 하필 그 타이밍에
+                        # 질문 생성/브로드캐스트가 진행 중이면 asyncio.CancelledError로
+                        # 조용히 유실된다 (CancelledError는 Exception이 아니라서
+                        # 아래 except로도 못 잡고, 로그도 안 남고 질문도 안 나감).
+                        # 별도 태스크로 분리해서 커넥션 생명주기와 무관하게 끝까지 실행되게 한다.
+                        asyncio.create_task(self._run_final_transcript(text, result))
 
                     except Exception as e:
                         print(f"[STT transcript 에러] {e}")
@@ -119,6 +188,7 @@ class STTAggregator:
                     self._connected = False
 
                     if not self._closed:
+                        self._record_failure()
                         await self._finish_deepgram_connection(
                             reason="deepgram_error_event",
                             mark_closed=False,
@@ -129,6 +199,9 @@ class STTAggregator:
                     self._connected = False
 
                     if not self._closed:
+                        # 세션 종료 등으로 우리가 직접 닫은 게 아니라 Deepgram/네트워크 쪽에서
+                        # 끊긴 경우(예: keepalive ping timeout 1011)만 실패로 집계한다.
+                        self._record_failure()
                         await self._finish_deepgram_connection(
                             reason="deepgram_close_event",
                             mark_closed=False,
@@ -154,12 +227,14 @@ class STTAggregator:
 
                 await self._dg_connection.start(options)
                 self._connected = True
+                self._record_success()
 
                 print("[Deepgram] 연결 시작 완료")
 
             except Exception as e:
                 self._connected = False
                 self._dg_connection = None
+                self._record_failure()
                 print(f"[Deepgram 연결 실패] {e}")
                 raise
 
@@ -167,29 +242,19 @@ class STTAggregator:
         segment_id = f"seg_{self.session_id}_{self._segment_index}"
         now_ms = int(time.time() * 1000)
 
-        start_ms = int(result.start * 1000) if hasattr(result, "start") else now_ms
+        # result.start는 Deepgram 커넥션이 "시작된 시점" 기준 상대 타임스탬프라서,
+        # 질문/답변 구간마다 재연결이 일어날 때마다 다시 0 근처로 리셋된다.
+        # 세션 전체를 관통하는 절대 시각이 필요한 곳(대본 정렬, 발표 시간 계산)에
+        # 그대로 쓰면 순서와 duration이 다 꼬인다 (silence_tracker.py가 이미 같은
+        # 이유로 wall clock을 쓰는 것과 동일한 문제).
+        # duration은 발화 길이 자체라 재연결과 무관하게 정확하므로 그대로 믿고,
+        # 절대 위치(start/end)는 결과가 도착한 wall clock 시각을 기준으로 잡는다.
         duration_ms = int(result.duration * 1000) if hasattr(result, "duration") else 0
-        end_ms = start_ms + duration_ms
+        end_ms = now_ms
+        start_ms = max(0, end_ms - duration_ms)
 
-        # 중요:
-        # transcript 저장은 session_ws.py의 on_final_transcript()에서만 한다.
-        # 여기서도 push_transcript를 하면 같은 발화가 Redis에 중복 저장될 수 있다.
-        #
-        # await self.sr.push_transcript(text)
-
-        # Supabase scripts 테이블 저장은 유지
-        try:
-            sb = get_supabase()
-            sb.table("scripts").insert({
-                "session_id": self.session_id,
-                "transcript": text,
-                "start_ms": start_ms,
-                "end_ms": end_ms,
-                "segment_index": self._segment_index,
-            }).execute()
-        except Exception as e:
-            print(f"[scripts 저장 에러] {e}")
-
+        # scripts 저장은 session_ws.on_final_transcript()에서만 한다.
+        # (답변/질문 구간 Deepgram 결과가 발표 대본에 섞이지 않도록 상태 검사 후 저장)
         self._segment_index += 1
 
         await ws_manager.broadcast(
@@ -202,6 +267,19 @@ class STTAggregator:
                 await self._on_final_callback(text, start_ms, end_ms)
             except Exception as e:
                 print(f"[STT 콜백 에러] {e}")
+
+    async def _run_final_transcript(self, text: str, result):
+        """
+        on_transcript가 asyncio.create_task로 띄우는 진입점.
+
+        Deepgram 커넥션의 내부 태스크와 분리된 별도 태스크에서 실행되므로,
+        처리 도중 커넥션이 끊겨 conn.finish()가 호출되더라도 이 태스크는
+        취소되지 않고 LLM 인터럽트 판단~질문 생성~브로드캐스트까지 끝까지 진행된다.
+        """
+        try:
+            await self._on_final_transcript(text, result)
+        except Exception as e:
+            print(f"[STT final transcript 처리 에러] {e}")
 
     async def send_audio(self, audio_base64: str):
         """
@@ -226,6 +304,7 @@ class STTAggregator:
             print(f"[오디오 전송 에러] {e}")
 
             self._connected = False
+            self._record_failure()
 
             await self._finish_deepgram_connection(
                 reason="send_audio_failed",

@@ -10,15 +10,17 @@ class QuestionGenerationInput(BaseModel):
 
     - recent_context: 최근 발화 문맥
     - current_topic: 현재 발표 주제
-    - audience_type: interviewer / professor / investor
-    - presentation_type: job_interview / contest / presentation
+    - audience_type: professor / investor / boss / general
+    - presentation_type: academic / school / meeting
     - pressure_level: low / medium / high
     - previous_questions: 이전에 했던 질문들
     """
     recent_context: List[str] = Field(default_factory=list)
+    full_context: Optional[str] = None  # 지금까지 발표한 전체 발화 (요약 아님, 원문 그대로)
     current_topic: Optional[str] = None
     audience_type: str
     presentation_type: str
+    audience_count: Optional[int] = None
     pressure_level: str = "medium"
     previous_questions: List[str] = Field(default_factory=list)
 
@@ -60,6 +62,7 @@ class AnswerEvaluationInput(BaseModel):
 
     current_topic: Optional[str] = None
     recent_context: List[str] = Field(default_factory=list)
+    full_context: Optional[str] = None  # 지금까지 발표한 전체 발화 (요약 아님, 원문 그대로)
     pressure_level: str = "medium"
 
     is_follow_up: bool = False
@@ -72,14 +75,20 @@ class AnswerEvaluationResult(BaseModel):
     """
     사용자 답변 평가 결과
 
-    - answer_score: 0~100 점수
+    - answer_score: 0~100 점수 (내용 70% + 유형/주제정합성 30%)
     - follow_up_needed: 추가 질문 필요 여부
     - audience_reaction: confused / neutral / satisfied / impressed
     - evaluation_reason: 평가 이유
     - follow_up_question: 추가 질문이 필요할 경우 생성되는 질문
+    - answer_category: CORRECT / PARTIAL / DONT_KNOW / OFF_TOPIC / NONSENSE
+    - topic_alignment: 유형(주제정합성) 점수 0~100
+    - topic_feedback: 분류 결과에 따른 한 줄 피드백
     """
     answer_score: float
     follow_up_needed: bool
     audience_reaction: str
     evaluation_reason: str
     follow_up_question: Optional[str] = None
+    answer_category: Optional[str] = None
+    topic_alignment: Optional[float] = None
+    topic_feedback: Optional[str] = None

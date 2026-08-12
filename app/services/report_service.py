@@ -21,6 +21,7 @@ from app.schemas.report import (
     CriterionScoreItem,
     UserPatternOutput,
 )
+from app.services.prompt_scenarios import build_scenario_block, AUDIENCE_TYPE_CONTENT_CHECKS
 
 try:
     if settings.gemini_api_key:
@@ -61,6 +62,9 @@ class ReportService:
             weaknesses = self._extract_weaknesses(data, summary, response_score)
             strengths = self._extract_strengths(data, summary, response_score)
             improvements = self._build_improvements(weaknesses)
+            strengths, weaknesses, improvements = self._merge_topic_feedback(
+                data, summary, strengths, weaknesses, improvements
+            )
             overall_score = self._calculate_overall_score(summary, response_score, weaknesses)
             criteria_scores = []
             curriculum_next = None  # updated_pattern 계산 후 채움
@@ -96,7 +100,11 @@ class ReportService:
         """
         LLM 기준별 평가 결과를 overall_score / response_score / 강점·개선 포인트·실천 방법 / 기준별 점수로 변환한다.
         """
-        weights = get_weights(has_qa=has_qa)
+        weights = get_weights(
+            has_qa=has_qa,
+            audience_type=data.audience_type,
+            pressure_level=data.pressure_level,
+        )
         total_weight = sum(weights.get(c.criterion_id, 0.0) for c in eval_result.criteria)
         if total_weight > 0:
             overall_score = sum(
@@ -134,7 +142,51 @@ class ReportService:
         if not improvements:
             improvements = self._build_improvements(weaknesses)
 
+        strengths, weaknesses, improvements = self._merge_topic_feedback(
+            data, summary, strengths, weaknesses, improvements
+        )
+
         return overall_score, response_score, strengths, weaknesses, improvements, criteria_scores, eval_result.overall_comment
+
+    def _merge_topic_feedback(
+        self,
+        data: ReportGenerationInput,
+        summary: ReportSummary,
+        strengths: list[str],
+        weaknesses: list[str],
+        improvements: list[str],
+    ) -> tuple[list[str], list[str], list[str]]:
+        """주제 정합성 피드백을 강점/약점/개선에 보강한다."""
+        if not data.answer_evaluation_log:
+            return strengths, weaknesses, improvements
+
+        if summary.avg_topic_alignment >= 75:
+            msg = "답변이 질문·발표 주제에서 크게 벗어나지 않았습니다."
+            if msg not in strengths:
+                strengths = [*strengths, msg]
+        elif summary.avg_topic_alignment and summary.avg_topic_alignment < 60:
+            weak_msg = "답변이 질문이나 발표 주제에서 자주 벗어납니다."
+            improve_msg = "질문 핵심에 한 문장으로 먼저 답한 뒤, 발표 주제와 연결된 예시로 확장하세요."
+            if weak_msg not in weaknesses:
+                weaknesses = [*weaknesses, weak_msg]
+            if improve_msg not in improvements:
+                improvements = [*improvements, improve_msg]
+
+        # 낮은 정합성/이탈·의미불명 답변 피드백 최대 2개
+        low_feedbacks = []
+        for item in data.answer_evaluation_log:
+            if not item.topic_feedback:
+                continue
+            cat = (item.answer_category or "").upper()
+            if cat in ("OFF_TOPIC", "NONSENSE", "DONT_KNOW"):
+                low_feedbacks.append(item.topic_feedback)
+            elif item.topic_alignment is not None and item.topic_alignment < 60:
+                low_feedbacks.append(item.topic_feedback)
+        for fb in low_feedbacks[:2]:
+            if fb not in weaknesses:
+                weaknesses = [*weaknesses, fb]
+
+        return strengths, weaknesses, improvements
 
     def _generate_evaluation(
         self,
@@ -195,8 +247,14 @@ class ReportService:
 
         qa_lines = []
         for item in data.answer_evaluation_log:
+            category = item.answer_category or "없음"
+            feedback = item.topic_feedback or "없음"
             qa_lines.append(
-                f"Q: {item.question_text}\nA: {item.user_answer}\n점수: {item.answer_score}/100"
+                f"Q: {item.question_text}\n"
+                f"A: {item.user_answer}\n"
+                f"답변 유형: {category}\n"
+                f"점수: {item.answer_score}/100\n"
+                f"피드백: {feedback}"
             )
         qa_section = chr(10).join(qa_lines) if qa_lines else "질의응답 없음"
 
@@ -215,11 +273,14 @@ logical_structure / message_clarity 평가에 반영하세요. 발화 내용이 
         if has_qa:
             qa_criterion_block = """
 ### 4. qa_response (질문 대응력/회복력)
-질문 의도에 맞는 답변을 했는지, 인터럽트 이후 발표 흐름을 얼마나 빨리 회복했는지 평가합니다.
-- 90~100: 질문 의도를 정확히 파악해 구체적 근거/예시로 답변, 빠르게 회복
-- 70~89: 답변은 했으나 구체성/근거 부족, 회복은 양호
-- 50~69: 답변이 질문 의도와 다소 어긋나거나 회복이 느림
-- 0~49: 답변 회피 또는 매우 부실, 회복 실패
+질문 의도에 맞는 답변을 했는지, 주제에서 벗어나지 않았는지, 인터럽트 이후 발표 흐름을 얼마나 빨리 회복했는지 평가합니다.
+- 90~100: 질문 의도를 정확히 파악해 주제 안에서 구체적 근거/예시로 답변, 빠르게 회복
+- 70~89: 답변은 했으나 구체성/근거 부족이거나 주제가 약간 흔들림, 회복은 양호
+- 50~69: 답변이 질문 의도·발표 주제와 다소 어긋나거나 회복이 느림
+- 0~49: 답변 회피, 주제 이탈이 크거나 매우 부실, 회복 실패
+주제 정합성 점수와 주제 피드백을 qa_response 점수·diagnosis·action_item에 반드시 반영하세요.
+각 답변의 유형(CORRECT/PARTIAL/DONT_KNOW/OFF_TOPIC/NONSENSE)도 함께 고려하세요.
+DONT_KNOW는 주제 이탈(OFF_TOPIC)과 다르게 취급하고, OFF_TOPIC/NONSENSE는 더 엄격히 감점하세요.
 """
             criteria_instruction = "criteria 배열에 logical_structure, message_clarity, delivery_fluency, qa_response 4개를 모두 포함하세요."
         else:
@@ -232,6 +293,30 @@ logical_structure / message_clarity 평가에 반영하세요. 발화 내용이 
 - 발화 단어 수가 10 미만입니다. 모든 criterion의 evidence/diagnosis에
   "발표가 거의 수행되지 않아 해당 기준을 신뢰성 있게 평가할 수 없습니다"를 반영하고 0~30점 사이의 낮은 점수를 부여하세요.
   action_item에는 "마이크를 켜고 실제로 말하면서 연습하세요"를 포함하세요."""
+
+        env_section = ""
+        if any([data.presentation_type, data.audience_type, data.pressure_level, data.audience_count, data.topic]):
+            scenario_block = build_scenario_block(
+                data.presentation_type, data.audience_type, data.pressure_level, data.audience_count,
+            )
+            topic_line = f"- 발표 주제: {data.topic}\n" if data.topic else ""
+            content_check = AUDIENCE_TYPE_CONTENT_CHECKS.get(data.audience_type)
+            content_check_line = (
+                f"\n- 이 청중 유형에서 특히 확인해야 할 내용 요소: {content_check}\n"
+                "  발표 내용(실제 발화·대본)에 이 요소들이 실제로 등장했는지를 logical_structure와 message_clarity의\n"
+                "  evidence/diagnosis에 구체적으로 언급하세요 (등장했다면 어디서, 빠졌다면 무엇이 빠졌는지)."
+                if content_check else ""
+            )
+            env_section = f"""
+## 발표 환경
+{topic_line}{scenario_block}
+{content_check_line}
+
+위 발표 환경을 반드시 고려하여 평가하세요. qa_response뿐 아니라 logical_structure/message_clarity 평가에도
+이 환경 맥락(청중이 무엇을 궁금해할지, 압박 강도)을 구체적으로 반영하세요. professor라면 근거의 타당성을,
+압박 강도가 high라면 답변의 디테일 부족에 더 엄격한 기준을 적용하세요. evidence/diagnosis는 이 발표의
+실제 주제·내용을 짚어 서술하고, 다른 발표에도 그대로 적용될 법한 뻔한 문장은 피하세요.
+"""
 
         return f"""당신은 발표 코칭 전문가입니다. 아래 [평가 기준]에 따라 발표를 분석하고,
 기준별로 점수(0~100)와 evidence(근거), diagnosis(진단), action_item(실천 항목)을 작성하세요.
@@ -259,12 +344,14 @@ WPM, 필러 단어, 침묵 구간을 바탕으로 발화가 매끄럽게 전달�
 - 50~69: 말속도 또는 필러/침묵 중 한 가지 이상이 뚜렷한 문제
 - 0~49: 여러 지표가 동시에 문제
 {qa_criterion_block}
+{env_section}
 ## 세션 데이터
 - 평균 WPM: {summary.avg_wpm} (적정: 100~160)
 - 필러 단어: {summary.filler_count}회 (5회 이상이면 유창성 저하)
 - 침묵 구간: {summary.silence_count}회
 - 돌발 질문: {summary.interrupt_count}회
 - 평균 답변 점수: {summary.avg_answer_score:.1f}/100
+- 평균 주제 정합성: {summary.avg_topic_alignment:.1f}/100
 - 발화 단어 수: {transcript_word_count}단어
 {script_section}
 ## 실제 발화 내용
@@ -301,8 +388,15 @@ WPM, 필러 단어, 침묵 구간을 바탕으로 발화가 매끄럽게 전달�
 
         if data.answer_evaluation_log:
             avg_answer_score = mean(item.answer_score for item in data.answer_evaluation_log)
+            alignment_values = [
+                item.topic_alignment
+                for item in data.answer_evaluation_log
+                if item.topic_alignment is not None
+            ]
+            avg_topic_alignment = mean(alignment_values) if alignment_values else 0.0
         else:
             avg_answer_score = 0.0
+            avg_topic_alignment = 0.0
 
         return ReportSummary(
             avg_wpm=round(avg_wpm, 2),
@@ -310,7 +404,8 @@ WPM, 필러 단어, 침묵 구간을 바탕으로 발화가 매끄럽게 전달�
             filler_count=filler_count,
             silence_count=silence_count,
             interrupt_count=len(data.interrupt_log),
-            avg_answer_score=round(avg_answer_score, 2)
+            avg_answer_score=round(avg_answer_score, 2),
+            avg_topic_alignment=round(avg_topic_alignment, 2),
         )
 
     def _calculate_fallback_response_score(self, data: ReportGenerationInput) -> float:
@@ -352,6 +447,9 @@ WPM, 필러 단어, 침묵 구간을 바탕으로 발화가 매끄럽게 전달�
         if summary.avg_answer_score >= 75:
             strengths.append("질문에 대한 답변 대응력이 좋습니다.")
 
+        if summary.avg_topic_alignment >= 75 and data.answer_evaluation_log:
+            strengths.append("답변이 질문·발표 주제에서 크게 벗어나지 않았습니다.")
+
         if response_score is not None and response_score >= 75:
             strengths.append("질문에 대한 대응 및 회복 속도가 빠릅니다.")
 
@@ -385,6 +483,9 @@ WPM, 필러 단어, 침묵 구간을 바탕으로 발화가 매끄럽게 전달�
         if summary.avg_answer_score < 60 and data.answer_evaluation_log:
             weaknesses.append("질문에 대한 답변 구체성이 부족합니다.")
 
+        if summary.avg_topic_alignment and summary.avg_topic_alignment < 60 and data.answer_evaluation_log:
+            weaknesses.append("답변이 질문이나 발표 주제에서 자주 벗어납니다.")
+
         if response_score is not None and response_score < 60:
             weaknesses.append("질문에 대한 대응 및 회복이 느린 편입니다.")
 
@@ -408,6 +509,8 @@ WPM, 필러 단어, 침묵 구간을 바탕으로 발화가 매끄럽게 전달�
                 improvements.append("예상 질문에 대한 답변 템플릿을 준비해 침묵 구간을 줄여보세요.")
             elif "답변 구체성" in weakness:
                 improvements.append("답변에 이유, 예시, 근거를 함께 넣는 방식으로 구체성을 높여보세요.")
+            elif "주제" in weakness:
+                improvements.append("질문 핵심에 한 문장으로 먼저 답한 뒤, 발표 주제와 연결된 예시로 확장하세요.")
             elif "대응" in weakness or "회복" in weakness:
                 improvements.append("인터럽트 직후 핵심 키워드부터 다시 꺼내 말하는 회복 훈련이 필요합니다.")
 

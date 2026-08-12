@@ -12,12 +12,13 @@ from app.schemas.report import (
     UserPatternInput,
     SpeechMetricsSnapshot,
     AnswerEvaluationLogItem,
+    InterruptLogItem,
 )
 
 
 class SessionService:
 
-    async def create_session(self, config: dict) -> str:
+    async def create_session(self, config: dict, user_id: int) -> str:
         session_id = f"sess_{uuid.uuid4().hex[:12]}"
         sr = SessionRedis(session_id)
         await sr.set_state(SessionState.READY)
@@ -28,11 +29,13 @@ class SessionService:
         # presentation_histories에 초기 행 INSERT
         sb = get_supabase()
         sb.table("presentation_histories").insert({
-            "user_id":            config.get("user_id", 1),
+            "user_id":            user_id,
             "session_id":         session_id,
             "title":              config.get("title"),
             "presentation_type":  config.get("presentation_type"),
             "audience_type":      config.get("audience_type"),
+            "audience_count":     config.get("audience_count"),
+            "pressure_level":     config.get("pressure_level"),
             "duration_seconds":   config.get("duration_seconds"),
         }).execute()
 
@@ -140,11 +143,27 @@ class SessionService:
                     answer_score=item.get("answer_score", 0),
                     follow_up_needed=item.get("follow_up_needed", False),
                     audience_reaction=item.get("audience_reaction", ""),
+                    answer_category=item.get("answer_category"),
+                    topic_alignment=item.get("topic_alignment"),
+                    topic_feedback=item.get("topic_feedback"),
                 )
                 for item in answer_log
             ]
 
+            interrupt_log = [
+                InterruptLogItem(
+                    question_text=item.get("question_text", ""),
+                    reason=item.get("reason", ""),
+                    interrupt_type=item.get("interrupt_type"),
+                    answered=item.get("answered", False),
+                    answer_score=item.get("answer_score"),
+                    follow_up_count=item.get("follow_up_count", 0),
+                )
+                for item in interrupt_list
+            ]
+
             report_input = ReportGenerationInput(
+                interrupt_log=interrupt_log,
                 speech_metrics=[snapshot],
                 recovery_metrics=RecoveryMetricsInput(
                     wpm_recovery_speed_score=wpm_recovery,
@@ -155,6 +174,11 @@ class SessionService:
                 answer_evaluation_log=answer_eval_log,
                 transcript_text=transcript_text,
                 script_text=script_text,
+                presentation_type=config.get("presentation_type"),
+                audience_type=config.get("audience_type"),
+                audience_count=config.get("audience_count"),
+                pressure_level=config.get("pressure_level"),
+                topic=config.get("title"),
             )
 
             result = await asyncio.to_thread(ReportService().generate_report, report_input)

@@ -1,8 +1,9 @@
 import asyncio
 import json
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from app.core.supabase_client import get_supabase
+from app.api.deps import get_current_user_id
 
 router = APIRouter()
 
@@ -59,8 +60,11 @@ async def get_report(session_id: str):
 
     return {
         "session_id":         row["session_id"],
+        "topic":              row.get("title"),
         "presentation_type":  row.get("presentation_type"),
         "audience_type":      row.get("audience_type"),
+        "audience_count":     row.get("audience_count"),
+        "pressure_level":     row.get("pressure_level"),
         "duration_seconds":   row.get("duration_seconds"),
         "avg_wpm":            row.get("avg_wpm", 0),
         "filler_count":       row.get("filler_count", 0),
@@ -101,17 +105,58 @@ async def get_session_scripts(session_id: str):
 
 
 @router.get(
-    "/users/{user_id}/sessions",
-    summary="유저 세션 목록 조회",
+    "/users/me/sessions",
+    summary="내 세션 목록 조회",
 )
-async def get_user_sessions(user_id: int):
+async def get_user_sessions(user_id: int = Depends(get_current_user_id)):
     sb = get_supabase()
     res = sb.table("presentation_histories") \
-        .select("id, session_id, title, presentation_type, audience_type, duration_seconds, overall_score, created_at") \
+        .select(
+            "id, session_id, title, presentation_type, audience_type, audience_count, "
+            "pressure_level, duration_seconds, overall_score, interrupt_count, created_at"
+        ) \
         .eq("user_id", user_id) \
         .order("created_at", desc=True) \
         .execute()
     return res.data
+
+
+@router.delete(
+    "/sessions/{session_id}",
+    summary="세션 삭제",
+)
+async def delete_session(session_id: str, user_id: int = Depends(get_current_user_id)):
+    sb = get_supabase()
+    res = sb.table("presentation_histories") \
+        .select("session_id") \
+        .eq("session_id", session_id) \
+        .eq("user_id", user_id) \
+        .execute()
+    if not res.data:
+        raise HTTPException(status_code=404, detail="세션을 찾을 수 없습니다.")
+
+    sb.table("scripts").delete().eq("session_id", session_id).execute()
+    sb.table("question_answers").delete().eq("session_id", session_id).execute()
+    sb.table("presentation_histories").delete().eq("session_id", session_id).execute()
+
+    return {"deleted": True, "session_id": session_id}
+
+
+@router.delete(
+    "/users/me/sessions",
+    summary="내 세션 전체 삭제",
+)
+async def delete_all_user_sessions(user_id: int = Depends(get_current_user_id)):
+    sb = get_supabase()
+    res = sb.table("presentation_histories").select("session_id").eq("user_id", user_id).execute()
+    session_ids = [row["session_id"] for row in (res.data or [])]
+
+    if session_ids:
+        sb.table("scripts").delete().in_("session_id", session_ids).execute()
+        sb.table("question_answers").delete().in_("session_id", session_ids).execute()
+        sb.table("presentation_histories").delete().eq("user_id", user_id).execute()
+
+    return {"deleted_count": len(session_ids)}
 
 
 @router.get(
